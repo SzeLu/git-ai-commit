@@ -1,4 +1,5 @@
-use anyhow::Result;
+// src/config.rs
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 

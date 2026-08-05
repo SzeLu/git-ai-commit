@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use colored::*;
 
 use crate::git::RepoInfo;
 
@@ -13,7 +12,7 @@ struct DeepSeekRequest {
     max_tokens: u16,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct Message {
     role: String,
     content: String,
@@ -39,8 +38,11 @@ pub async fn generate_commit_message(
     max_tokens: u16,
     temperature: f32,
 ) -> Result<String> {
+    // 修复：先获取环境变量并持有所有权
+    let env_key = std::env::var("DEEPSEEK_API_KEY").ok();
     let api_key = api_key
-        .or_else(|| std::env::var("DEEPSEEK_API_KEY").ok().as_deref())
+        .map(String::from)
+        .or(env_key)
         .context("请设置 DEEPSEEK_API_KEY 环境变量或通过 --api-key 参数提供")?;
 
     let commit_types = vec![

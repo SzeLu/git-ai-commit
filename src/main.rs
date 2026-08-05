@@ -1,19 +1,21 @@
+// src/main.rs
 mod git;
 mod ai;
 mod commit;
 mod config;
 
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use colored::*;
 use anyhow::Result;
+use std::env;
 
 #[derive(Parser)]
 #[command(name = "git-ai-commit")]
-#[command(about = "使用 DeepSeek AI 生成 Conventional Commits + Body 格式的 Git commit 消息", long_about = None)]
+#[command(about = "使用 DeepSeek AI 生成 Conventional Commits + Body 格式的 Git commit 消息")]
 #[command(version = "1.0.0")]
 struct Cli {
     /// DeepSeek API Key (也可通过环境变量 DEEPSEEK_API_KEY 设置)
-    #[arg(long, env = "DEEPSEEK_API_KEY")]
+    #[arg(long)]
     api_key: Option<String>,
 
     /// 使用的模型 (默认: deepseek-chat)
@@ -45,6 +47,11 @@ struct Cli {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    // 获取 API Key（优先命令行参数，其次环境变量）
+    let api_key = cli.api_key
+        .or_else(|| env::var("DEEPSEEK_API_KEY").ok())
+        .map(|s| s.to_string());
+
     // 检查是否在 Git 仓库中
     if !git::is_git_repo()? {
         eprintln!("{}", "❌ 当前目录不是 Git 仓库".red());
@@ -73,9 +80,8 @@ async fn main() -> Result<()> {
     // 生成 commit 消息
     println!("{}", "🤖 正在生成 commit 消息...".blue());
     
-    let api_key = cli.api_key.as_deref();
     let commit_msg = ai::generate_commit_message(
-        api_key,
+        api_key.as_deref(),
         &cli.model,
         &diff,
         &status,
