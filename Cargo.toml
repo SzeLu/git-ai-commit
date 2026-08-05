@@ -1,7 +1,7 @@
 [package]
 name = "git-ai-commit"
 version = "1.0.0"
-edition = "2026"
+edition = "2024"
 description = "使用 DeepSeek AI 生成 Conventional Commits + Body 格式的 Git commit 消息"
 authors = ["Sze Lu<im.szelu@gmail.com>"]
 license = "MIT"
