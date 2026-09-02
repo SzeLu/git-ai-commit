@@ -20,7 +20,7 @@ fn prompt_input(prompt: &str) -> String {
 /// CLI 入口
 #[derive(Parser)]
 #[command(name = "git-ai-commit")]
-#[command(about = "使用 DeepSeek AI 生成 Conventional Commits + Body 格式的 Git commit 消息")]
+#[command(about = "使用 AI 生成 Conventional Commits + Body 格式的 Git commit 消息")]
 #[command(version = "1.0.0")]
 struct Cli {
     /// 自动提交，不进行确认

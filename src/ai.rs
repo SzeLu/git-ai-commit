@@ -7,7 +7,7 @@ use crate::git::RepoInfo;
 use crate::config;
 
 #[derive(Debug, Serialize)]
-struct DeepSeekRequest {
+struct LlmRequest {
     model: String,
     messages: Vec<Message>,
     temperature: f32,
@@ -21,7 +21,7 @@ struct Message {
 }
 
 #[derive(Debug, Deserialize)]
-struct DeepSeekResponse {
+struct LlmResponse {
     choices: Vec<Choice>,
 }
 
@@ -96,7 +96,7 @@ pub async fn generate_commit_message(
     );
 
     let client = Client::new();
-    let request = DeepSeekRequest {
+    let request = LlmRequest {
         model: config.model.to_string(),
         messages: vec![
             Message {
@@ -142,14 +142,14 @@ pub async fn generate_commit_message(
         .json(&request)
         .send()
         .await
-        .context("调用 DeepSeek API 失败")?;
+        .context("调用 大模型 API 失败")?;
 
     if !response.status().is_success() {
         let error_text = response.text().await?;
         anyhow::bail!("API 请求失败: {}", error_text);
     }
 
-    let response_data: DeepSeekResponse = response
+    let response_data: LlmResponse = response
         .json()
         .await
         .context("解析 API 响应失败")?;

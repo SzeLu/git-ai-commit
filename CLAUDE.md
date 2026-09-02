@@ -19,7 +19,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ├─ src/
 │  ├─ main.rs          # CLI entry point – parses args, loads config, orchestrates flow
 │  ├─ git.rs           # thin wrapper around Git commands (diff, status, commit)
-│  ├─ ai.rs            # talks to DeepSeek API to generate a Conventional‑Commit message
+│  ├─ ai.rs            # talks to LLM API to generate a Conventional‑Commit message
 │  ├─ commit.rs        # validates format and performs the actual `git commit`
 │  └─ config.rs        # loads/serialises user configuration from `$HOME/.git-ai-commit/config.json`
 ├─ build.sh            # builds the Rust binary for distribution
@@ -31,13 +31,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
    * Loads the configuration file (multiple model support).
    * Verifies we are inside a Git repo.
    * Gathers the diff, status and stats via `git.rs`.
-   * Calls `ai::generate_commit_message` to ask DeepSeek for a commit message.
+   * Calls `ai::generate_commit_message` to ask LLM for a commit message.
    * If `--dry-run`, prints the generated message and runs `commit::validate_commit_message`.
    * Otherwise calls `commit_with_confirmation` to prompt the user and commit.
 
 2. **Git helper (`git.rs`)** – Executes Git commands using `std::process::Command`. It returns the raw output strings used by the AI prompt.
 
-3. **AI module (`ai.rs`)** – Sends a JSON payload to the DeepSeek endpoint (configured via `config::ModelConfig`). It passes the diff, status, stats and repository info. The response is a plain commit message.
+3. **AI module (`ai.rs`)** – Sends a JSON payload to the LLM endpoint (configured via `config::ModelConfig`). It passes the diff, status, stats and repository info. The response is a plain commit message.
 
 4. **Commit module (`commit.rs`)** – Validates the format against Conventional Commit rules and commits using a temporary file to avoid argument length limits.
 
