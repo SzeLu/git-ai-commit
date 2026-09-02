@@ -9,6 +9,7 @@ use colored::*;
 use anyhow::Result;
 use std::env;
 
+/// CLI 入口
 #[derive(Parser)]
 #[command(name = "git-ai-commit")]
 #[command(about = "使用 DeepSeek AI 生成 Conventional Commits + Body 格式的 Git commit 消息")]
@@ -49,6 +50,10 @@ async fn main() -> Result<()> {
 
     // 读取配置文件，支持多模型列表与选定模型
     let config = config::Config::load()?;
+
+    // 打印当前使用的大模型
+    println!("📌 当前使用的大模型: {}", config.selected_model.red());
+
     // 获取 API Key（优先命令行参数，其次环境变量）
     let api_key = cli.api_key
         .or_else(|| env::var("DEEPSEEK_API_KEY").ok())
@@ -63,7 +68,7 @@ async fn main() -> Result<()> {
     // 获取变更
     println!("{}", "📊 分析代码变更...".blue());
     let diff = git::get_git_diff(cli.all)?;
-    
+
     if diff.is_empty() {
         if cli.all {
             eprintln!("{}", "❌ 没有检测到任何变更".red());
@@ -81,13 +86,14 @@ async fn main() -> Result<()> {
 
     // 生成 commit 消息
     println!("{}", "🤖 正在生成 commit 消息...".blue());
-    
+
     let selected_model = if !config.selected_model.is_empty() {
         &config.selected_model
     } else {
         &cli.model
     };
-let commit_msg = ai::generate_commit_message(
+
+    let commit_msg = ai::generate_commit_message(
         api_key.as_deref(),
         selected_model,
         &diff,
@@ -96,7 +102,8 @@ let commit_msg = ai::generate_commit_message(
         &repo_info,
         cli.max_tokens,
         cli.temperature,
-    ).await?;
+    )
+    .await?;
 
     // 处理结果
     if cli.dry_run {
@@ -105,7 +112,7 @@ let commit_msg = ai::generate_commit_message(
         println!("{}", "=".repeat(70).yellow());
         println!("{}", commit_msg);
         println!("{}", "=".repeat(70).yellow());
-        
+
         // 验证格式
         if commit::validate_commit_message(&commit_msg) {
             println!("{}", "✅ 格式验证通过".green());

@@ -16,8 +16,18 @@ fi
 
 echo "Removing configuration directory..."
 if [ -d "$CONFIG_DIR" ]; then
-  rm -rf "$CONFIG_DIR"
-  echo "✓ Removed $CONFIG_DIR"
+  # Prompt user whether to delete configuration directory
+  read -r -p "是否删除配置文件？[y/N] " choice
+enum=0
+  case "$choice" in
+    [yY][eE][sS]|[yY])
+      rm -rf "$CONFIG_DIR"
+      echo "✓ Removed $CONFIG_DIR"
+      ;;
+    *)
+      echo "⚠️  保留配置目录 $CONFIG_DIR"
+      ;;
+  esac
 else
   echo "⚠️ Config directory not found at $CONFIG_DIR"
 fi
