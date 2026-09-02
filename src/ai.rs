@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::git::RepoInfo;
 
+use crate::config;
+
 #[derive(Debug, Serialize)]
 struct DeepSeekRequest {
     model: String,
@@ -29,8 +31,7 @@ struct Choice {
 }
 
 pub async fn generate_commit_message(
-    api_key: Option<&str>,
-    model: &str,
+    config: &config::ModelConfig,
     diff: &str,
     status: &str,
     diff_stats: &str,
@@ -38,13 +39,6 @@ pub async fn generate_commit_message(
     max_tokens: u16,
     temperature: f32,
 ) -> Result<String> {
-    // 修复：先获取环境变量并持有所有权
-    let env_key = std::env::var("DEEPSEEK_API_KEY").ok();
-    let api_key = api_key
-        .map(String::from)
-        .or(env_key)
-        .context("请设置 DEEPSEEK_API_KEY 环境变量或通过 --api-key 参数提供")?;
-
     let commit_types = vec![
         "feat", "fix", "docs", "style", "refactor",
         "perf", "test", "chore", "ci", "build", "revert"
@@ -103,7 +97,7 @@ pub async fn generate_commit_message(
 
     let client = Client::new();
     let request = DeepSeekRequest {
-        model: model.to_string(),
+        model: config.model.to_string(),
         messages: vec![
             Message {
                 role: "system".to_string(),
@@ -130,9 +124,20 @@ pub async fn generate_commit_message(
         max_tokens,
     };
 
+    let base_url = config.base_url.clone();
+
+    // Build endpoint URL based on base_url
+    let endpoint = if base_url.ends_with("/chat/completions") {
+        base_url.clone()
+    } else if base_url.ends_with('/') {
+        format!("{}chat/completions", base_url)
+    } else {
+        format!("{}/chat/completions", base_url)
+    };
+
     let response = client
-        .post("https://api.deepseek.com/chat/completions")
-        .header("Authorization", format!("Bearer {}", api_key))
+        .post(&endpoint)
+        .header("Authorization", format!("Bearer {}", config.api_token))
         .header("Content-Type", "application/json")
         .json(&request)
         .send()
