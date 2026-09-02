@@ -47,6 +47,8 @@ struct Cli {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    // 读取配置文件，支持多模型列表与选定模型
+    let config = config::Config::load()?;
     // 获取 API Key（优先命令行参数，其次环境变量）
     let api_key = cli.api_key
         .or_else(|| env::var("DEEPSEEK_API_KEY").ok())
@@ -80,9 +82,14 @@ async fn main() -> Result<()> {
     // 生成 commit 消息
     println!("{}", "🤖 正在生成 commit 消息...".blue());
     
-    let commit_msg = ai::generate_commit_message(
+    let selected_model = if !config.selected_model.is_empty() {
+        &config.selected_model
+    } else {
+        &cli.model
+    };
+let commit_msg = ai::generate_commit_message(
         api_key.as_deref(),
-        &cli.model,
+        selected_model,
         &diff,
         &status,
         &diff_stats,

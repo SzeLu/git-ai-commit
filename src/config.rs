@@ -5,17 +5,38 @@ use std::path::PathBuf;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
+    /// 默认使用的模型名称（兼容旧配置）
+    #[serde(default = "default_model")]
     pub model: String,
+    /// 允许配置多个大模型的列表（按优先级顺序）
+    #[serde(default = "default_models")]
+    pub models: Vec<String>,
+    /// 当前选中的模型，默认使用 `model`
+    #[serde(default = "default_selected_model")]
+    pub selected_model: String,
     pub max_tokens: u16,
     pub temperature: f32,
     pub auto_commit: bool,
     pub strict_format: bool,
 }
 
+fn default_model() -> String {
+    "deepseek-chat".to_string()
+}
+fn default_models() -> Vec<String> {
+    vec!["deepseek-chat".to_string()]
+}
+fn default_selected_model() -> String {
+    "deepseek-chat".to_string()
+}
+
+
 impl Default for Config {
     fn default() -> Self {
         Self {
             model: "deepseek-chat".to_string(),
+            models: vec!["deepseek-chat".to_string()],
+            selected_model: "deepseek-chat".to_string(),
             max_tokens: 1000,
             temperature: 0.7,
             auto_commit: false,
