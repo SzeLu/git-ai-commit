@@ -32,9 +32,17 @@ pub fn get_git_status() -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-pub fn get_git_diff_stats() -> Result<String> {
-    let output = Command::new("git")
-        .args(["diff", "--cached", "--stat"])
+pub fn get_git_diff_stats(all: bool) -> Result<String> {
+    let mut cmd = Command::new("git");
+    cmd.arg("diff");
+    
+    if !all {
+        cmd.arg("--cached");
+    }
+    
+    cmd.arg("--stat");
+
+    let output = cmd
         .output()
         .context("获取 Git diff stats 失败")?;
     
