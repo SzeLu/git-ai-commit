@@ -40,8 +40,8 @@ pub async fn generate_commit_message(
     temperature: f32,
 ) -> Result<String> {
     let commit_types = vec![
-        "feat", "fix", "docs", "style", "refactor",
-        "perf", "test", "chore", "ci", "build", "revert"
+        "feat", "fix", "docs", "style", "refactor", "perf", "test", "chore", "ci", "build",
+        "revert",
     ];
 
     let prompt = format!(
@@ -102,7 +102,9 @@ pub async fn generate_commit_message(
             Message {
                 role: "system".to_string(),
                 content: r#"你是一个专业的 Git commit 消息生成专家。
+你必须**直接输出**最终的 commit 消息，**严禁**进行任何推理、解释或思维链（CoT）分析。
 你必须严格按照以下格式输出：
+
 <type>(<scope>): <subject>
 
 <body>
@@ -113,7 +115,8 @@ pub async fn generate_commit_message(
 - type 必须是小写字母
 - subject 不超过50个字符
 - body 要详细描述变更内容
-- 各部分之间要有空行分隔"#.to_string(),
+- 各部分之间要有空行分隔"#
+                    .to_string(),
             },
             Message {
                 role: "user".to_string(),
@@ -149,10 +152,7 @@ pub async fn generate_commit_message(
         anyhow::bail!("API 请求失败: {}", error_text);
     }
 
-    let response_data: LlmResponse = response
-        .json()
-        .await
-        .context("解析 API 响应失败")?;
+    let response_data: LlmResponse = response.json().await.context("解析 API 响应失败")?;
 
     let message = response_data
         .choices

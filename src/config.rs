@@ -46,7 +46,7 @@ impl Default for Config {
             model: "".to_string(),
             models: HashMap::new(),
             selected_model: "".to_string(),
-            max_tokens: 1000,
+            max_tokens: 32768,
             temperature: 0.7,
             auto_commit: false,
             strict_format: true,
