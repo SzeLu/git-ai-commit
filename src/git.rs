@@ -23,13 +23,20 @@ pub fn get_git_diff(all: bool) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-pub fn get_git_status() -> Result<String> {
-    let output = Command::new("git")
-        .args(["status", "--short"])
-        .output()
-        .context("获取 Git status 失败")?;
-    
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+pub fn get_git_status(all: bool) -> Result<String> {
+    if all {
+        let output = Command::new("git")
+            .args(["status", "--short"])
+            .output()
+            .context("获取 Git status 失败")?;
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        let output = Command::new("git")
+            .args(["diff", "--cached", "--name-status"])
+            .output()
+            .context("获取 Git status 失败")?;
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }
 }
 
 pub fn get_git_diff_stats(all: bool) -> Result<String> {
@@ -86,3 +93,4 @@ pub fn commit_with_message(message: &str) -> Result<()> {
         anyhow::bail!("Git commit 失败，退出码: {}", status.code().unwrap_or(-1))
     }
 }
+

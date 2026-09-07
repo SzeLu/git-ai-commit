@@ -105,7 +105,7 @@ async fn main() -> Result<()> {
     }
 
     // 获取其他信息
-    let status = git::get_git_status()?;
+    let status = git::get_git_status(cli.all)?;
     let diff_stats = git::get_git_diff_stats(cli.all)?;
     let repo_info = git::get_repo_info()?;
 
