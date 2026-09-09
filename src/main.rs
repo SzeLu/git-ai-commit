@@ -110,20 +110,71 @@ async fn main() -> Result<()> {
     let repo_info = git::get_repo_info()?;
 
     // 生成 commit 消息
-    println!("{}", "🤖 正在生成 commit 消息...".blue());
+    println!("{}", "🤖 正在分析变更...".blue());
 
     let model_config = config.models.get(&config.selected_model).unwrap();
 
-    let commit_msg = ai::generate_commit_message(
-        &model_config,
-        &diff,
-        &status,
-        &diff_stats,
-        &repo_info,
-        config.max_tokens,
-        config.temperature,
-    )
-    .await?;
+    // 设定分块阈值（字符数）
+    let chunk_threshold = 8000;
+
+    let mut commit_msg = if diff.len() > chunk_threshold {
+        println!("{}", "⚠️  变更内容较长，正在采用“分块总结 -> 合并 -> 生成”机制进行处理...".yellow());
+        let mut chunks = Vec::new();
+        let mut current_pos = 0;
+        let diff_bytes = diff.as_bytes();
+        
+        while current_pos < diff_bytes.len() {
+            let end = std::cmp::min(current_pos + chunk_size_safe(diff_bytes.len(), chunk_threshold), diff_bytes.len());
+            let mut actual_end = end;
+            while actual_end > current_pos && diff_bytes[actual_end - 1] != b'\n' {
+                actual_end -= 1;
+            }
+            if actual_end == current_pos {
+                actual_end = end;
+            }
+            
+            chunks.push(&diff[current_pos..actual_end]);
+            current_pos = actual_end;
+        }
+
+        let mut summaries = Vec::new();
+        for (i, chunk) in chunks.iter().enumerate() {
+            print!("   [块 {}/{}] 正在生成摘要...", i + 1, chunks.len());
+            io::stdout().flush()?;
+            let summary = ai::generate_summary(&model_config, chunk).await?;
+            summaries.push(summary);
+            println!("{}", " 完成".green());
+        }
+
+        let combined_summaries = summaries.join("\n");
+        let custom_prompt = format!(
+            "以下是代码变更的分块摘要，请根据这些信息生成一个符合 Conventional Commits 规范且包含详细 Body 的最终 commit 消息：\n\n{}",
+            combined_summaries
+        );
+        
+        ai::generate_commit_message_custom_prompt(
+            &model_config,
+            &custom_prompt,
+            config.max_tokens,
+            config.temperature,
+        ).await?
+    } else {
+        println!("{}", "⚡ 变更规模适中，正在实时生成提交消息...".green());
+        
+        ai::generate_commit_message_streaming(
+            &model_config,
+            &diff,
+            &status,
+            &diff_stats,
+            &repo_info,
+            config.max_tokens,
+            config.temperature,
+            |chunk| {
+                print!("{}", chunk);
+                io::stdout().flush().unwrap();
+            },
+        ).await?
+    };
 
     // 处理结果
     if cli.dry_run {
@@ -133,7 +184,6 @@ async fn main() -> Result<()> {
         println!("{}", commit_msg);
         println!("{}", "=".repeat(70).yellow());
 
-        // 验证格式
         if commit::validate_commit_message(&commit_msg) {
             println!("{}", "✅ 格式验证通过".green());
         } else {
@@ -145,3 +195,12 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
+
+fn chunk_size_safe(total_len: usize, chunk_size: usize) -> usize {
+    if total_len < chunk_size {
+        total_len
+    } else {
+        chunk_size
+    }
+}
+

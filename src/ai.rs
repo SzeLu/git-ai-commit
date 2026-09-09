@@ -11,7 +11,9 @@ struct LlmRequest {
     model: String,
     messages: Vec<Message>,
     temperature: f32,
-    max_tokens: u16,
+    max_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -27,18 +29,24 @@ struct LlmResponse {
 
 #[derive(Debug, Deserialize)]
 struct Choice {
-    message: Message,
+    message: Option<Message>,
+    delta: Option<Message>,
 }
 
-pub async fn generate_commit_message(
+/// 核心生成逻辑 (带流式回调)
+pub async fn generate_commit_message_streaming<F>(
     config: &config::ModelConfig,
     diff: &str,
     status: &str,
     diff_stats: &str,
     repo_info: &RepoInfo,
-    max_tokens: u16,
+    max_tokens: u32,
     temperature: f32,
-) -> Result<String> {
+    mut callback: F,
+) -> Result<String>
+where
+    F: FnMut(String),
+{
     let commit_types = vec![
         "feat", "fix", "docs", "style", "refactor", "perf", "test", "chore", "ci", "build",
         "revert",
@@ -125,11 +133,112 @@ pub async fn generate_commit_message(
         ],
         temperature,
         max_tokens,
+        stream: Some(true),
     };
 
     let base_url = config.base_url.clone();
+    let endpoint = if base_url.ends_with("/chat/completions") {
+        base_url.clone()
+    } else if base_url.ends_with('/') {
+        format!("{}chat/completions", base_url)
+    } else {
+        format!("{}/chat/completions", base_url)
+    };
 
-    // Build endpoint URL based on base_url
+    let mut response = client
+        .post(&endpoint)
+        .header("Authorization", format!("Bearer {}", config.api_token))
+        .header("Content-Type", "application/json")
+        .json(&request)
+        .send()
+        .await
+        .context("调用 大模型 API 失败")?;
+
+    if !response.status().is_success() {
+        let error_text = response.text().await?;
+        anyhow::bail!("API 请求失败: {}", error_text);
+    }
+
+    use futures_util::StreamExt;
+    let mut stream = response.bytes_stream();
+    let mut full_content = String::new();
+
+    while let Some(chunk_result) = stream.next().await {
+        let chunk = chunk_result.context("读取响应流失败")?;
+        let chunk_str = String::from_utf8_lossy(&chunk);
+        
+        for line in chunk_str.lines() {
+            if line.starts_with("data: ") {
+                let json_str = &line[6..];
+                if json_str == "[DONE]" {
+                    return Ok(full_content);
+                }
+                if let Ok(res) = serde_json::from_str::<LlmResponse>(json_str) {
+                    if let Some(choice) = res.choices.first() {
+                        if let Some(delta) = &choice.delta {
+                            if let Some(content) = &delta.content {
+                                if !content.is_empty() {
+                                    full_content.push_str(content);
+                                    callback(content.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(full_content)
+}
+
+/// 普通版本（非流式，供非交互逻辑使用）
+pub async fn generate_commit_message(
+    config: &config::ModelConfig,
+    diff: &str,
+    status: &str,
+    diff_stats: &str,
+    repo_info: &RepoInfo,
+    max_tokens: u32,
+    temperature: f32,
+) -> Result<String> {
+    generate_commit_message_streaming(
+        config,
+        diff,
+        status,
+        diff_stats,
+        repo_info,
+        max_tokens,
+        temperature,
+        |_| {},
+    )
+    .await
+}
+
+/// 生成摘要
+pub async fn generate_summary(
+    config: &config::ModelConfig,
+    diff_chunk: &str,
+) -> Result<String> {
+    let client = Client::new();
+    let request = LlmRequest {
+        model: config.model.to_string(),
+        messages: vec![
+            Message {
+                role: "system".to_string(),
+                content: "你是一个代码变更分析专家。请用一句话总结接下来的代码变更内容。".to_string(),
+            },
+            Message {
+                role: "user".to_string(),
+                content: diff_chunk.to_string(),
+            },
+        ],
+        temperature: 0.3,
+        max_tokens: 200,
+        stream: None,
+    };
+
+    let base_url = config.base_url.clone();
     let endpoint = if base_url.ends_with("/chat/completions") {
         base_url.clone()
     } else if base_url.ends_with('/') {
@@ -145,22 +254,8 @@ pub async fn generate_commit_message(
         .json(&request)
         .send()
         .await
-        .context("调用 大模型 API 失败")?;
+        .context("调用 摘要生成 API 失败")?;
 
-    if !response.status().is_success() {
-        let error_text = response.text().await?;
-        anyhow::bail!("API 请求失败: {}", error_text);
-    }
-
-    let response_data: LlmResponse = response.json().await.context("解析 API 响应失败")?;
-
-    let message = response_data
-        .choices
-        .first()
-        .context("API 返回空响应")?
-        .message
-        .content
-        .clone();
-
-    Ok(message)
+    let response_data: LlmResponse = response.json().await.context("解析摘要响应失败")?;
+    Ok(response_data.choices[0].message.as_ref().and_then(|m| m.content.clone()).unwrap_or_default())
 }

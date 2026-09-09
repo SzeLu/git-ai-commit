@@ -15,7 +15,7 @@ pub struct Config {
     /// 当前选中的模型，默认使用 `model`
     #[serde(default = "default_selected_model")]
     pub selected_model: String,
-    pub max_tokens: u16,
+    pub max_tokens: u32,
     pub temperature: f32,
     pub auto_commit: bool,
     pub strict_format: bool,
