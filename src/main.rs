@@ -173,8 +173,6 @@ async fn main() -> Result<()> {
         // 流式输出结尾没有换行，先补一个，免得提示和消息粘在同一行
         eprintln!();
         commit::print_validation(&validation);
-        println!("\n{}", "生成的 Commit 消息：".yellow());
-        println!("{}", generated.text);
 
         if config.strict_format {
             if auto {
