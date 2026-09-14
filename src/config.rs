@@ -270,7 +270,7 @@ mod tests {
         assert_eq!(config.final_params().temperature, 0.4);
     }
 
-    /// 语言字段：缺省为 English，并兼容历史拼写错误 `lanaguage`。
+    /// 语言字段：缺省为 English。
     #[test]
     fn language_defaults_and_accepts_legacy_typo() {
         assert_eq!(Config::default().language, "English");
