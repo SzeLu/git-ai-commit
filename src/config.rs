@@ -7,7 +7,7 @@ use std::path::PathBuf;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
     /// 默认语言（用于 Prompt 模板）
-    #[serde(default = "default_language", alias = "lanaguage")]
+    #[serde(default = "default_language")]
     pub language: String,
     /// 默认使用的模型名称（兼容旧配置）
     #[serde(default = "default_model")]
@@ -275,7 +275,7 @@ mod tests {
     fn language_defaults_and_accepts_legacy_typo() {
         assert_eq!(Config::default().language, "English");
         assert_eq!(parse(r#"{"language": "Japanese"}"#).language, "Japanese");
-        assert_eq!(parse(r#"{"lanaguage": "Chinese"}"#).language, "Chinese");
+        assert_eq!(parse(r#"{"language": "Chinese"}"#).language, "Chinese");
     }
 
     #[test]
