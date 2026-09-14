@@ -233,7 +233,7 @@ async fn generate_message(
             repo_info,
         };
         let text = ai::generate_commit_message_streaming(
-            model_config,
+            config,
             &context,
             config.final_params(),
             print_delta,
@@ -272,7 +272,15 @@ async fn generate_message(
         print!("   [块 {index}/{total}] 正在生成摘要...");
         io::stdout().flush()?;
 
-        match ai::generate_summary(model_config, piece, config.summary_params(), &label).await {
+        match ai::generate_summary(
+            model_config,
+            &config.language,
+            piece,
+            config.summary_params(),
+            &label,
+        )
+        .await
+        {
             Ok(summary) => {
                 sections.push(format!(
                     "### 块 {index}/{total}（模型摘要）\n{}",
@@ -332,17 +340,21 @@ async fn generate_message(
 
 分块摘要：
 {}
+
+要求：所有内容（subject、body、footer）必须使用 {} 书写。
 "#,
         repo_info.branch,
         repo_info.remote,
         diff_stats,
         status,
-        sections.join("\n\n")
+        sections.join("\n\n"),
+        config.language
     );
 
     println!("{}", "✍️  正在生成最终提交消息...".blue());
     match ai::generate_commit_message_custom_prompt(
         model_config,
+        &config.language,
         &custom_prompt,
         config.final_params(),
         print_delta,

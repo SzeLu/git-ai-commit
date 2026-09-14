@@ -9,7 +9,14 @@ use crate::config::{self, GenParams};
 use crate::debug;
 use crate::git::RepoInfo;
 
-const SYSTEM_PROMPT: &str = r#"你是一个专业的 Git commit 消息生成专家。
+/// 构造 commit 消息生成的 system prompt。
+///
+/// 语言走 system 通道统一下发，而不是只在某一条 user prompt 里提一句：
+/// 三条生成入口（短 diff、长 diff 的最终生成、分块摘要）都从这里取，
+/// 保证 `config.language` 对每条路径都生效。
+fn system_prompt(language: &str) -> String {
+    format!(
+        r#"你是一个专业的 Git commit 消息生成专家。
 你必须**直接输出**最终的 commit 消息，**严禁**进行任何推理、解释或思维链（CoT）分析。
 你必须严格按照以下格式输出：
 
@@ -23,7 +30,11 @@ const SYSTEM_PROMPT: &str = r#"你是一个专业的 Git commit 消息生成专�
 - type 必须是小写字母
 - subject 不超过50个字符
 - body 要详细描述变更内容
-- 各部分之间要有空行分隔"#;
+- 各部分之间要有空行分隔
+- 所有内容（subject、body、footer）必须使用{}书写"#,
+        language
+    )
+}
 
 #[derive(Debug, Serialize)]
 struct LlmRequest {
@@ -501,7 +512,7 @@ pub struct CommitContext<'a> {
 
 /// 核心生成逻辑 (带流式回调)
 pub async fn generate_commit_message_streaming<F>(
-    config: &config::ModelConfig,
+    config: &config::Config,
     context: &CommitContext<'_>,
     params: GenParams,
     callback: F,
@@ -514,6 +525,9 @@ where
         "revert",
     ];
 
+    let model_config = config
+        .active_model()
+        .context("No active model configured. Please run with --model or set it in config.json")?;
     let prompt = format!(
         r#"你是一个专业的 Git commit 消息生成专家。请根据以下代码变更生成一个符合 Conventional Commits 规范且包含详细 Body 的 commit 消息。
 
@@ -541,19 +555,18 @@ where
 要求：
 1. Type：{}
 2. Scope（可选）：影响的范围，如模块名、组件名
-3. Subject：简洁描述（不超过50字符，中文，现在时态）
+3. Subject：简洁描述（不超过50字符，现在时态）
 4. Body：详细描述
    - 说明改了什么、为什么改
    - 列出主要变更点（使用 - 或 * 列表）
    - 如果有 Breaking Changes 需要特别说明
-   - 使用中文
 5. Footer（可选）：关闭的 Issue 或 Breaking Changes
 
 特别注意：
 - 分析代码变更，理解其目的和影响
 - Body 部分要详细且有价值
 - 确保格式严格遵循 Conventional Commits 规范
-- 所有描述使用中文
+- 所有描述必须使用 {} 书写
 - type 必须是小写字母
 
 请只返回 commit 消息内容，不要包含其他解释。"#,
@@ -562,21 +575,30 @@ where
         context.diff_stats,
         context.status,
         context.diff,
-        commit_types.join(", ")
+        commit_types.join(", "),
+        config.language,
     );
 
     stream_chat_completion(
-        config,
-        vec![Message::system(SYSTEM_PROMPT), Message::user(prompt)],
+        model_config,
+        vec![
+            Message::system(system_prompt(&config.language)),
+            Message::user(&prompt),
+        ],
         params,
         callback,
     )
     .await?
-    .require_content("生成 commit 消息", &[&config.api_token])
+    .require_content("生成 commit 消息", &[&model_config.api_token])
 }
 
+/// 长 diff 的最终生成入口。
+///
+/// `language` 必须由调用方传入：分块摘要阶段的产物已经用该语言写成，
+/// 最终消息若换回默认语言会前后不一致。
 pub async fn generate_commit_message_custom_prompt<F>(
     config: &config::ModelConfig,
+    language: &str,
     prompt: &str,
     params: GenParams,
     callback: F,
@@ -586,7 +608,10 @@ where
 {
     stream_chat_completion(
         config,
-        vec![Message::system(SYSTEM_PROMPT), Message::user(prompt)],
+        vec![
+            Message::system(system_prompt(language)),
+            Message::user(prompt),
+        ],
         params,
         callback,
     )
@@ -605,6 +630,7 @@ where
 /// （甚至整个 `message` 字段缺失），所以统一走增量这条实测可用的路径。
 pub async fn generate_summary(
     config: &config::ModelConfig,
+    language: &str,
     diff_chunk: &str,
     params: GenParams,
     what: &str,
@@ -612,7 +638,10 @@ pub async fn generate_summary(
     stream_chat_completion(
         config,
         vec![
-            Message::system("你是一个代码变更分析专家。请用一句话总结接下来的代码变更内容。"),
+            Message::system(format!(
+                "你是一个代码变更分析专家。请用一句话总结接下来的代码变更内容，必须使用{}书写。",
+                language
+            )),
             Message::user(diff_chunk),
         ],
         params,
@@ -722,7 +751,14 @@ mod tests {
     /// 起一个 SSE 服务并跑一次摘要生成
     async fn run_summary(pieces: Vec<Vec<u8>>) -> Result<String> {
         let base_url = spawn_sse_server(pieces).await;
-        generate_summary(&test_config(base_url), "diff", params(), "第 1/1 块摘要").await
+        generate_summary(
+            &test_config(base_url),
+            "Chinese",
+            "diff",
+            params(),
+            "第 1/1 块摘要",
+        )
+        .await
     }
 
     /// 构造一个 `data:` 帧
@@ -968,5 +1004,12 @@ mod tests {
 
         assert_eq!(completion.content, "partial-tail");
         assert!(!completion.stats.saw_done);
+    }
+
+    /// system prompt 必须带上配置的语言，否则模型会跟着固定的中文模板走。
+    #[test]
+    fn system_prompt_embeds_configured_language() {
+        assert!(system_prompt("English").contains("English"));
+        assert!(system_prompt("中文").contains("中文"));
     }
 }

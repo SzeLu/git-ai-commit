@@ -85,9 +85,6 @@ pub fn commit_with_confirmation(message: &str, auto: bool) -> Result<()> {
         "{}",
         "📝 生成的 Commit 消息 (Conventional + Body)：".green()
     );
-    println!("{}", "=".repeat(70).yellow());
-    println!("{}", message);
-    println!("{}", "=".repeat(70).yellow());
 
     print!("\n是否使用此消息提交？(y/n/e 编辑): ");
     io::stdout().flush()?;

@@ -6,6 +6,9 @@ use std::path::PathBuf;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
+    /// 默认语言（用于 Prompt 模板）
+    #[serde(default = "default_language", alias = "lanaguage")]
+    pub language: String,
     /// 默认使用的模型名称（兼容旧配置）
     #[serde(default = "default_model")]
     pub model: String,
@@ -42,6 +45,10 @@ pub struct Config {
 pub struct GenParams {
     pub max_tokens: u32,
     pub temperature: f32,
+}
+
+fn default_language() -> String {
+    "English".to_string()
 }
 
 fn default_model() -> String {
@@ -87,6 +94,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             model: "".to_string(),
+            language: default_language(),
             models: HashMap::new(),
             selected_model: "".to_string(),
             max_tokens: default_max_tokens(),
@@ -260,6 +268,14 @@ mod tests {
         // 最终生成不受摘要配置影响
         assert_eq!(config.final_params().max_tokens, 4096);
         assert_eq!(config.final_params().temperature, 0.4);
+    }
+
+    /// 语言字段：缺省为 English，并兼容历史拼写错误 `lanaguage`。
+    #[test]
+    fn language_defaults_and_accepts_legacy_typo() {
+        assert_eq!(Config::default().language, "English");
+        assert_eq!(parse(r#"{"language": "Japanese"}"#).language, "Japanese");
+        assert_eq!(parse(r#"{"lanaguage": "Chinese"}"#).language, "Chinese");
     }
 
     #[test]
