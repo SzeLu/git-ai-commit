@@ -4,10 +4,17 @@
 //! 逐级回退（spec §5.1）。整条链都取不到时返回 key 本身——这样即使翻译缺失，
 //! 界面也只会露出 key，而不会 panic 或输出空白。
 
-use fluent::{FluentBundle, FluentResource, FluentValue};
+use crate::debug;
+// 用 `concurrent::FluentBundle`（memoizer 内部是 Mutex）而不是默认的
+// `FluentBundle`（内部是 RefCell）：只有前者是 `Send + Sync`，而下面的进程级
+// `OnceLock<I18nManager>` 要求它。默认那个连 `static` 都放不进去——这不是
+// 「换个写法」的偏好，是编译期硬性条件。两者的格式化结果完全一致。
+use fluent::concurrent::FluentBundle;
+use fluent::{FluentResource, FluentValue};
 use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use unic_langid::{langid, LanguageIdentifier};
 
 /// 回退链的最后一格。
@@ -123,6 +130,69 @@ impl I18nManager {
     }
 }
 
+/// 进程级实例：`main()` 安装一次，之后所有调用点共用（R8）。
+static MANAGER: OnceLock<I18nManager> = OnceLock::new();
+
+/// 还没安装时的兜底管理器。
+///
+/// 用一个独立的空管理器而不是 `OnceLock::get_or_init`：后者会在第一次 `t()` 时就把
+/// 空管理器**钉死**，之后 `install` 永远装不进去——一次早于安装的调用就能让整个进程
+/// 只输出 key，而且毫无征兆。这里 `get` 失败只是回落，安装仍然随时可以生效。
+static UNINSTALLED: I18nManager = I18nManager {
+    bundles: Vec::new(),
+};
+
+/// 安装进程级 i18n。`main()` 里在**任何输出之前**调用一次。
+///
+/// 语言资源坏了不阻断启动：`init` 失败就装一个空管理器，界面露出 key，
+/// 其余功能照常走。locale 的问题从来不是致命的（spec §4）。
+pub fn install(config_language: Option<String>) {
+    let manager = match I18nManager::init(config_language) {
+        Ok(manager) => manager,
+        Err(err) => {
+            // 整片界面都会变成 key，这种程度的问题至少该在 --debug 下留一句原因。
+            if debug::enabled() {
+                eprintln!("[debug] i18n: {err}");
+            }
+            I18nManager {
+                bundles: Vec::new(),
+            }
+        }
+    };
+
+    // set-once：后到的安装被忽略。一个进程只有一种界面语言，这正是想要的语义。
+    let _ = MANAGER.set(manager);
+}
+
+/// 取一条本地化消息。
+///
+/// 没安装过（测试，或早于 `main()` 安装的路径）时返回 key 本身，不会 panic。
+pub fn t(key: &str) -> String {
+    manager().get_message(key, None)
+}
+
+/// 带插值的版本：`t_args("save_config_error", &[("error", e.to_string().into())])`。
+///
+/// 参数收 `&[(&str, FluentValue)]` 而不是 `&HashMap`：调用点全是「一两个具名变量」，
+/// 让每处都搭一个 map 是纯噪声。类型不是 `FluentValue` 的值先 `to_string()`。
+pub fn t_args<'v>(key: &str, args: &[(&str, FluentValue<'v>)]) -> String {
+    let args: HashMap<String, FluentValue<'v>> = args
+        .iter()
+        .map(|(name, value)| ((*name).to_string(), value.clone()))
+        .collect();
+
+    manager().get_message(key, Some(&args))
+}
+
+/// 当前生效的管理器。
+///
+/// `OnceLock<I18nManager>` 要求 `I18nManager: Send + Sync`（fluent 的 bundle 内部
+/// 把 memoizer 放在锁里，这两个 bound 成立）；不成立的话这里根本编译不过，
+/// 所以不存在「悄悄退化成 thread_local」的余地——那会在多线程 tokio 运行时下出错。
+fn manager() -> &'static I18nManager {
+    MANAGER.get().unwrap_or(&UNINSTALLED)
+}
+
 /// 把配置或系统给出的语言串解析成 locale。
 ///
 /// 解析不了就退回 en-US（spec §4 那条链的最后一格）。**配置值走这里，系统检测值
@@ -175,7 +245,7 @@ fn load_bundle(
         errors: errors.iter().map(ToString::to_string).collect(),
     })?;
 
-    let mut bundle = FluentBundle::new(vec![locale.clone()]);
+    let mut bundle = FluentBundle::new_concurrent(vec![locale.clone()]);
     // 关掉双向文本隔离符（FSI/PDI）：那是给 HTML 用的，落到终端里既看不见，
     // 又会让字符串比较、`grep` 和管道下游解析凭空多出不可见字符。
     bundle.set_use_isolating(false);
@@ -203,6 +273,7 @@ fn to_fluent_args<'v>(args: &HashMap<String, FluentValue<'v>>) -> fluent::Fluent
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     #[test]
     fn test_hello_en() {
@@ -266,5 +337,125 @@ mod tests {
         let manager = I18nManager::init(Some("en-US".to_string())).unwrap();
         let msg = manager.get_message("non_existent_key", None);
         assert_eq!(msg, "non_existent_key");
+    }
+
+    /// 全局访问器建立在 `OnceLock<I18nManager>` 上，这要求管理器是 `Send + Sync`
+    /// （R8 的前置条件）。把它钉在编译期：若哪天 fluent 换成 `!Sync` 的内部结构，
+    /// 这里先报错，而不是等运行时才暴露。
+    #[test]
+    fn manager_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+
+        assert_send_sync::<I18nManager>();
+    }
+
+    /// 没安装过时的契约：吐 key，不 panic。
+    ///
+    /// 这里测的是 `manager()` 的回退对象本身——「先于安装调用」在单进程内造不出来
+    /// （一旦有测试装了管理器，全局就是装过的状态），所以直接钉住它的行为。
+    #[test]
+    fn uninstalled_manager_returns_the_key() {
+        assert_eq!(
+            UNINSTALLED.get_message("not_git_repo", None),
+            "not_git_repo"
+        );
+    }
+
+    /// 固定键：`zh-CN.ftl` 必须能解析，且真实键渲染出中文原文。
+    ///
+    /// 在此之前 **没有任何测试加载过 zh-CN**（`cargo test` 只初始化 en-US / fr /
+    /// fr-US / es-ES / C），也就是说中文资源里写坏一个值是可以一路发布的。
+    #[test]
+    fn zh_cn_resource_parses_and_renders_chinese() {
+        let manager =
+            I18nManager::init(Some("zh-CN".to_string())).expect("locales/zh-CN.ftl 必须能解析");
+
+        // 普通一条
+        assert_eq!(
+            manager.get_message("not_git_repo", None),
+            "❌ 当前目录不是 Git 仓库"
+        );
+        assert_eq!(manager.get_message("commit_success", None), "✅ 提交成功！");
+
+        // 带插值的（下标是 usize）
+        let mut args = HashMap::new();
+        args.insert("index".to_string(), FluentValue::from(1usize));
+        args.insert("total".to_string(), FluentValue::from(3usize));
+        assert_eq!(
+            manager.get_message("chunk_summary", Some(&args)),
+            "第 1/3 块摘要"
+        );
+
+        // 前导空格靠 {"   "} 占位符带出来，Fluent 自己会吃掉行首空白
+        assert_eq!(
+            manager.get_message("use_all_flag_hint", None),
+            "   或使用 --all 参数包含所有变更"
+        );
+    }
+
+    /// zh/en 键集对齐：zh 里的每个键都必须在 en-US 里存在。
+    ///
+    /// 少一个键不会报错，只会在运行时悄悄回退成 key 本身——所以这条要在测试里拦。
+    /// 断言是**单向**的：`hello` 只存在于 en-US（R3 的固定测试键），
+    /// 差集必须恰好是它，en 侧多出来的别的键同样是漂移。
+    #[test]
+    fn zh_cn_keys_are_all_present_in_en_us() {
+        let zh = I18nManager::init(Some("zh-CN".to_string())).unwrap();
+        let en = I18nManager::init(Some("en-US".to_string())).unwrap();
+
+        let zh_keys = ftl_keys(&read_locale("zh-CN"));
+        let en_keys = ftl_keys(&read_locale("en-US"));
+
+        let undefined: Vec<&String> = zh_keys.iter().filter(|key| !defines(&en, key)).collect();
+        assert!(
+            undefined.is_empty(),
+            "zh-CN 有、en-US 没有的键（运行时会露出 key）: {undefined:?}"
+        );
+
+        let en_only: Vec<&String> = en_keys.difference(&zh_keys).collect();
+        assert_eq!(
+            en_only,
+            vec!["hello"],
+            "en-US 独有的键应当只剩 R3 的 hello 固定键"
+        );
+
+        // 反向自证：扫出来的键在 zh 上也必须定义得动，否则上面两条可能只是扫描器坏了
+        let zh_undefined: Vec<&String> = zh_keys.iter().filter(|key| !defines(&zh, key)).collect();
+        assert!(
+            zh_undefined.is_empty(),
+            "zh-CN 里解析不出的键: {zh_undefined:?}"
+        );
+    }
+
+    /// 某个键在回退链里是否**有定义**。
+    ///
+    /// 这里不能用「渲染结果 != key」当判据：`en-US.ftl` 的 `received = received`
+    /// 值恰好就等于键本身，会把一个完好的条目误判成缺失。`has_message` 查的是
+    /// 条目本身，与 `get_message` 的查找口径一致。
+    fn defines(manager: &I18nManager, key: &str) -> bool {
+        manager.bundles.iter().any(|bundle| bundle.has_message(key))
+    }
+
+    fn read_locale(locale: &str) -> String {
+        std::fs::read_to_string(format!("{LOCALES_DIR}/{locale}.ftl"))
+            .unwrap_or_else(|err| panic!("读不到 locales/{locale}.ftl: {err}"))
+    }
+
+    /// 从 `.ftl` 源文本里扫出顶层消息 ID。
+    ///
+    /// 为什么不用解析器：`FluentResource::entries()` 的 item 类型是
+    /// `fluent_syntax::ast::Entry`，而 `fluent-syntax` 没有被 fluent-bundle re-export，
+    /// 要匹配变体就得为一个测试再引一个必须与 fluent-bundle 版本严格同步的直接依赖。
+    /// 这里扫的是本仓库自己维护的 `locales/*.ftl`，格式规整（键在行首、`#` 是注释、
+    /// 多行值必须缩进），漏扫的只可能是注释和空行；真漏了一个键，上面「zh 有 en 没有」
+    /// 那条会以别的方式炸出来。
+    fn ftl_keys(source: &str) -> BTreeSet<String> {
+        source
+            .lines()
+            .filter(|line| !line.starts_with(char::is_whitespace) && !line.starts_with('#'))
+            .filter_map(|line| line.split_once('='))
+            .map(|(id, _)| id.trim().to_string())
+            .filter(|id| !id.is_empty())
+            .collect()
     }
 }
