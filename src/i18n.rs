@@ -413,6 +413,11 @@ mod tests {
     /// 其中一个键，这里把剩下的全部钉住。
     ///
     /// 期望值直接抄自 key-manifest 的 original literal 列（原字面量逐字拷贝）。
+    ///
+    /// 覆盖面的边界写在这里，免得这条测试再被当成它没做到的东西：钉住的是
+    /// **已经走 `t()` 的那部分界面**（main.rs / commit.rs / 本地兜底）里所有对空白
+    /// 敏感的键。ai.rs 的 `report_*` 与 `no_content_error` 还是硬编码，它们的 `{"  "}`
+    /// 缩进没在这里钉——等 ai.rs 接进来时一并补，别以为这里已经盖住了。
     #[test]
     fn whitespace_sensitive_keys_match_their_original_literals() {
         let manager = I18nManager::init(Some("zh-CN".to_string())).unwrap();
@@ -489,6 +494,56 @@ mod tests {
                 ]))
             ),
             "chore: 更新 2 个文件\n\n- M  a.rs\n（本条消息由本地降级逻辑生成：模型未返回内容）"
+        );
+
+        // 同一属性的其余六条：`⚠️` 后面同样是**两个**空格。值里写成一个，
+        // 终端上就是 `⚠️ 格式...`，同样不报错。
+        assert_eq!(
+            manager.get_message("format_warning_strict", None),
+            "⚠️  strict_format = true，但当前是交互模式，是否提交由你决定"
+        );
+        assert_eq!(
+            manager.get_message("format_warning_nonstrict", None),
+            "⚠️  格式校验未通过（strict_format = false，仍可提交）"
+        );
+        assert_eq!(
+            manager.get_message("degraded_confirmation_required", None),
+            "⚠️  本次为降级消息（模型未正常返回），强制走确认流程"
+        );
+        assert_eq!(
+            manager.get_message("long_diff_warning", None),
+            "⚠️  变更内容较长，正在采用“分块总结 -> 合并 -> 生成”机制进行处理..."
+        );
+        assert_eq!(
+            manager.get_message(
+                "degradation_warning",
+                Some(&args(&[("count", 1usize.into()), ("total", 3usize.into())]))
+            ),
+            "⚠️  有 1/3 块使用了本地降级摘要，最终消息质量可能下降"
+        );
+        assert_eq!(
+            manager.get_message(
+                "final_generation_failed",
+                Some(&args(&[("error", "连接超时".into())]))
+            ),
+            "⚠️  最终生成失败，改用本地兜底消息：连接超时"
+        );
+
+        // 反向属性：下面这三个提示语的值**首尾都不能有空格**。用户在提示语后面看到的
+        // 那个空格是调用处补的（main.rs:22 的 `print!("{} ", prompt)`）；值里再写一个
+        // `{" "}`，终端上就变成两个空格——静默，且只有中文这一格会中招。
+        // 钉的依旧是原字面量本身：原字面量的结尾没有空格。
+        assert_eq!(
+            manager.get_message("model_input_prompt", None),
+            "请输入模型名称 (e.g., deepseek-chat):"
+        );
+        assert_eq!(
+            manager.get_message("base_url_input_prompt", None),
+            "请输入模型 API URL:"
+        );
+        assert_eq!(
+            manager.get_message("api_token_input_prompt", None),
+            "请输入 API Token:"
         );
     }
 
