@@ -8,7 +8,7 @@ use fluent::{FluentBundle, FluentResource, FluentValue};
 use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use unic_langid::LanguageIdentifier;
+use unic_langid::{langid, LanguageIdentifier};
 
 /// 回退链的最后一格。
 const FALLBACK_LOCALE: &str = "en-US";
@@ -19,12 +19,11 @@ const LOCALES_DIR: &str = "locales";
 
 /// i18n 初始化失败的原因。
 ///
-/// 注意 `locales/` 目录或某个具体 `.ftl` 不存在**不算失败**：那只说明这一级
-/// 回退没有内容，链路继续往下走（见 [`I18nManager::init`]）。
+/// 这里只有「资源本身坏了」才叫失败。以下两种情况都**不算失败**：
+/// `locales/` 目录或某个具体 `.ftl` 不存在（这一级回退没内容，链路继续往下走），
+/// 以及语言标签解析不了（退回 en-US，见 [`I18nManager::init`]）。
 #[derive(Debug)]
 pub enum I18nError {
-    /// 语言标签不是合法的 BCP 47（例如旧配置里写的是 `Chinese` 这种自然语言名）
-    InvalidLocale(String),
     /// `.ftl` 存在但语法不合法
     FtlParse { path: PathBuf, errors: Vec<String> },
     /// `.ftl` 存在但读不出来
@@ -37,12 +36,6 @@ pub enum I18nError {
 impl fmt::Display for I18nError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidLocale(locale) => {
-                write!(
-                    f,
-                    "无法解析语言标签 \"{locale}\"（应为 BCP 47，例如 zh-CN）"
-                )
-            }
             Self::FtlParse { path, errors } => write!(
                 f,
                 "语言文件 {} 解析失败: {}",
@@ -81,20 +74,21 @@ impl I18nManager {
     /// 语言标签会先规范化成 BCP 47（`en_US` → `en-US`，`zh_cn` → `zh-CN`），
     /// 后续的文件名和回退链都基于规范化后的结果——这样配置里写 POSIX 风格或
     /// 大小写不规范的标签也能命中同一个文件。
+    ///
+    /// 标签解析不了**不阻断启动**：`LANG=C` / `LC_ALL=C` 是 Docker、CI、cron 的
+    /// 常见默认值，一个命令行工具不该因为读不懂一个语言串就拒绝运行。这时退回
+    /// en-US，也就是 spec §4 那条链的最后一格。
     pub fn init(config_language: Option<String>) -> Result<Self, I18nError> {
         let requested = config_language
             .filter(|language| !language.trim().is_empty())
             .or_else(sys_locale::get_locale)
             .unwrap_or_else(|| FALLBACK_LOCALE.to_string());
-        let requested = requested.trim();
 
-        let locale: LanguageIdentifier = requested
-            .parse()
-            .map_err(|_| I18nError::InvalidLocale(requested.to_string()))?;
+        let locale = resolve_locale(&requested);
 
         let mut bundles = Vec::new();
-        for candidate in fallback_chain(&locale) {
-            if let Some(bundle) = load_bundle(&candidate)? {
+        for (stem, bundle_locale) in fallback_chain(&locale) {
+            if let Some(bundle) = load_bundle(&stem, &bundle_locale)? {
                 bundles.push(bundle);
             }
         }
@@ -129,26 +123,44 @@ impl I18nManager {
     }
 }
 
+/// 把配置或系统给出的语言串解析成 locale。
+///
+/// 解析不了就退回 en-US（spec §4 那条链的最后一格）。**配置值走这里，系统检测值
+/// 也走这里**——一个命令行工具不该因为读不懂一个语言串就拒绝运行。
+fn resolve_locale(requested: &str) -> LanguageIdentifier {
+    requested
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| langid!("en-US"))
+}
+
 /// 回退链：精确 locale → 主语言 → en-US，按序去重（`en-US` 自己只需查一遍）。
-fn fallback_chain(locale: &LanguageIdentifier) -> Vec<String> {
-    let mut chain = vec![locale.to_string()];
+///
+/// 每一格是 `(文件名词干, 该文件的 locale)`——两者分开，是因为语言级那一格的文件名
+/// 取主语言（`fr-CA` → `fr.ftl`），而 bundle 的 locale 只影响复数与日期规则，
+/// 同一个语言下并无差别，直接复用不必再解析出一个 `LanguageIdentifier` 来。
+fn fallback_chain(locale: &LanguageIdentifier) -> Vec<(String, LanguageIdentifier)> {
+    let mut chain = vec![(locale.to_string(), locale.clone())];
 
     let language = locale.language.to_string();
-    if language != chain[0] {
-        chain.push(language);
+    if language != chain[0].0 {
+        chain.push((language, locale.clone()));
     }
-    if !chain.iter().any(|candidate| candidate == FALLBACK_LOCALE) {
-        chain.push(FALLBACK_LOCALE.to_string());
+    if !chain.iter().any(|(stem, _)| stem == FALLBACK_LOCALE) {
+        chain.push((FALLBACK_LOCALE.to_string(), resolve_locale(FALLBACK_LOCALE)));
     }
 
     chain
 }
 
-/// 加载一个 BCP 47 标签对应的 `.ftl`。
+/// 加载一个文件名词干对应的 `.ftl`。
 ///
 /// 文件不存在返回 `Ok(None)`——这一级回退空缺，让链路继续往下走。
-fn load_bundle(locale: &str) -> Result<Option<FluentBundle<FluentResource>>, I18nError> {
-    let path = Path::new(LOCALES_DIR).join(format!("{locale}.ftl"));
+fn load_bundle(
+    stem: &str,
+    locale: &LanguageIdentifier,
+) -> Result<Option<FluentBundle<FluentResource>>, I18nError> {
+    let path = Path::new(LOCALES_DIR).join(format!("{stem}.ftl"));
     if !path.is_file() {
         return Ok(None);
     }
@@ -163,11 +175,7 @@ fn load_bundle(locale: &str) -> Result<Option<FluentBundle<FluentResource>>, I18
         errors: errors.iter().map(ToString::to_string).collect(),
     })?;
 
-    let langid: LanguageIdentifier = locale
-        .parse()
-        .map_err(|_| I18nError::InvalidLocale(locale.to_string()))?;
-
-    let mut bundle = FluentBundle::new(vec![langid]);
+    let mut bundle = FluentBundle::new(vec![locale.clone()]);
     // 关掉双向文本隔离符（FSI/PDI）：那是给 HTML 用的，落到终端里既看不见，
     // 又会让字符串比较、`grep` 和管道下游解析凭空多出不可见字符。
     bundle.set_use_isolating(false);
@@ -238,6 +246,19 @@ mod tests {
 
         let msg = manager.get_message("hello", Some(&args));
         assert_eq!(msg, "Bonjour, Monde!");
+    }
+
+    /// 回归测试：`LANG=C` / `LC_ALL=C`（Docker、CI、cron 的常见默认值）给出的
+    /// 不是 BCP 47 标签，绝不能因此拒绝启动——退回 en-US，UI 走英文那一格。
+    #[test]
+    fn test_unparseable_locale_falls_back_to_en_us() {
+        let manager =
+            I18nManager::init(Some("C".to_string())).expect("locale 解析失败不应让 init 失败");
+        let mut args = HashMap::new();
+        args.insert("name".to_string(), fluent::FluentValue::from("World"));
+
+        let msg = manager.get_message("hello", Some(&args));
+        assert_eq!(msg, "Hello, World!");
     }
 
     #[test]

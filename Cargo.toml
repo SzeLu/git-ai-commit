@@ -22,7 +22,9 @@ futures-util = "0.3"
 fluent = "0.16"
 # FluentBundle::new 收 Vec<LanguageIdentifier>，而 fluent 没有 re-export 这个类型，
 # 只能直接依赖 unic-langid（版本必须与 fluent-bundle 内部使用的一致，否则类型不通用）。
-unic-langid = "0.9"
+# `macros` 特性带来 langid! —— 编译期校验的语言标签字面量，兜底语言因此不需要
+# 任何运行期解析，也就不存在 panic 路径。
+unic-langid = { version = "0.9", features = ["macros"] }
 sys-locale = "0.3"
 
 [profile.release]
