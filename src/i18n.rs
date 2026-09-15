@@ -111,7 +111,7 @@ impl I18nManager {
     pub fn init(config_language: Option<String>) -> Result<Self, I18nError> {
         let requested = requested_locale(config_language, sys_locale::get_locale());
 
-        let locale = resolve_locale(&requested);
+        let locale = negotiate_locale(&resolve_locale(&requested));
 
         let bundles = load_chain(fallback_chain(&locale), load_bundle)?;
 
@@ -236,15 +236,77 @@ fn requested_locale(config_language: Option<String>, detected: Option<String>) -
         .unwrap_or_else(|| FALLBACK_LOCALE.to_string())
 }
 
+/// 把历史配置里接受过的「自然语言名」规范成 BCP 47 标签。
+///
+/// 早期版本允许用户在 config.json 里写 `"Chinese"` / `"Japanese"` 这样的自然
+/// 语言名（`src/config.rs` 的测试至今还把它们当合法输入钉着）。它们**不是**解析
+/// 失败的那一类——`"Chinese"` 按 7 个字母能塞进 BCP 47 的 language 子标签位，
+/// `parse` 会把它解析成一个语言为 `chinese` 的合法标签，只是没有对应的 `.ftl`。
+/// 于是界面整条链落空变成英文，而 prompt 模板里却带着原样值，出现「英文界面 +
+/// 中文提交消息」这种错位。所以这里必须先于解析把它们翻译成标签，后面的一切
+/// （解析、协商、回退链）才都走同一条路。
+///
+/// 返回 `None` 表示「不是已知的自然语言名」，调用方按普通标签继续解析。
+fn normalize_language_name(input: &str) -> Option<&'static str> {
+    let trimmed = input.trim();
+    // 英文名不区分大小写（旧配置可能写 "Chinese" 或 "chinese"）；中文名没有
+    // 大小写之分，直接按原文比。两段匹配都只覆盖「历史接受过」的那几个值，
+    // 不替用户猜更多。
+    let lower = trimmed.to_ascii_lowercase();
+    match lower.as_str() {
+        "chinese" => Some("zh-CN"),
+        "english" => Some("en-US"),
+        "japanese" => Some("ja"),
+        _ => match trimmed {
+            "中文" | "简体中文" => Some("zh-CN"),
+            "英文" => Some("en-US"),
+            "日本語" => Some("ja"),
+            _ => None,
+        },
+    }
+}
+
 /// 把配置或系统给出的语言串解析成 locale。
 ///
-/// 解析不了就退回 en-US（spec §4 那条链的最后一格）。**配置值走这里，系统检测值
-/// 也走这里**——一个命令行工具不该因为读不懂一个语言串就拒绝运行。
+/// 先过一遍 [`normalize_language_name`]，把自然语言名翻译成 BCP 47，其余
+/// 字符串按标签原样解析。解析不了就退回 en-US（spec §4 那条链的最后一格）。
+/// **配置值走这里，系统检测值也走这里**——一个命令行工具不该因为读不懂一个
+/// 语言串就拒绝运行。
 fn resolve_locale(requested: &str) -> LanguageIdentifier {
-    requested
-        .trim()
+    normalize_language_name(requested)
+        .unwrap_or_else(|| requested.trim())
         .parse()
         .unwrap_or_else(|_| langid!("en-US"))
+}
+
+/// 把解析出来的 locale 与内嵌资源里**实际存在的词干**协商。
+///
+/// 系统的语言检测会给带脚本的标签：macOS 的 `CFLocaleCopyPreferredLanguages`
+/// 对中文用户返回 `zh-Hans-CN`。而内嵌资源只按 `zh-CN` 起名，`fallback_chain`
+/// 只生成 `zh-Hans-CN` / `zh` / `en-US` 三格——前两格都没有文件，整条链
+/// 直接落到英文，中文用户拿到的是一整个英文界面。这里用 `matches` 找出能
+/// **覆盖**请求语言的内嵌词干：词干当「范围」，缺省的子标签是通配符，所以
+/// `zh-CN`（无脚本）能覆盖 `zh-Hans-CN`（带脚本），而 `zh-Hant-TW` 因为地区
+/// 不同覆盖不了 `zh-CN`、`en-GB` 也覆盖不了 `en-US`。
+///
+/// 精确命中优先：请求的就是某个内嵌词干时原样保留——否则 `fr-US` 会被更宽松的
+/// `fr` 吞掉，丢掉它自己的文件。协商不中则原样返回，交给 [`fallback_chain`]
+/// 走老逻辑回退——没映射上的 locale 的表现与改动前完全一致，不能因此变差。
+fn negotiate_locale(requested: &LanguageIdentifier) -> LanguageIdentifier {
+    let requested_stem = requested.to_string();
+    if locale_source(&requested_stem).is_some() {
+        return requested.clone();
+    }
+    for (stem, _) in LOCALE_SOURCES {
+        // LOCALE_SOURCES 里的词干都是合法 BCP 47（见上方常量表注释），unwrap 不会失败。
+        let Ok(stem_locale) = stem.parse::<LanguageIdentifier>() else {
+            continue;
+        };
+        if stem_locale.matches(requested, true, false) {
+            return stem_locale;
+        }
+    }
+    requested.clone()
 }
 
 /// 回退链：精确 locale → 主语言 → en-US，按序去重（`en-US` 自己只需查一遍）。
@@ -418,6 +480,24 @@ mod tests {
         assert_eq!(msg, "Hello, World!");
     }
 
+    /// 回归测试（本轮修复的核心）：macOS 上 `sys_locale` 给出的带脚本标签
+    /// `zh-Hans-CN` 必须落到内嵌的 `zh-CN` 资源，渲染出中文。
+    ///
+    /// 只断言 `init` 返回 `Ok` 远远不够——修复前 `init(Some("zh-Hans-CN"))` 也是
+    /// Ok，只是回退链（`zh-Hans-CN` / `zh` / `en-US`）前两格都没有文件，静默落到
+    /// 英文，中文用户拿到的是一整个英文界面，而且 `zh-Hans-CN` 还会被写回
+    /// config.json 持久化。必须钉住**真实键渲染出的中文原文**：这条断言正是前五轮
+    /// 逐个任务评审都看不见这个缺陷的原因，也是它在本轮必须补上的唯一一道防线。
+    #[test]
+    fn zh_hans_cn_renders_chinese() {
+        let manager = I18nManager::init(Some("zh-Hans-CN".to_string()))
+            .expect("zh-Hans-CN 协商失败不应让 init 失败");
+        assert_eq!(
+            manager.get_message("not_git_repo", None),
+            "❌ 当前目录不是 Git 仓库"
+        );
+    }
+
     /// 一格的坏资源只丢自己，不该丢掉整条链；只有底板坏掉才是真的失败。
     ///
     /// 内嵌之后「坏资源」只能来自一份写坏的 `.ftl`，而测试不许改 `locales/`，
@@ -498,6 +578,56 @@ mod tests {
             resolve_locale(&requested_locale(None, Some("C".to_string()))).to_string(),
             "en-US"
         );
+    }
+
+    /// 历史配置接受过的自然语言名必须规范成 BCP 47，再走后续的协商与回退链。
+    ///
+    /// 这些值不是「解析失败」——`"Chinese"` 会被当成 7 个字母的语言子标签解析成
+    /// `chinese`，只是没有对应 `.ftl`，于是界面英文、prompt 里却带着原样值。
+    /// 端到端断言钉住「`init(Some("Chinese"))` 渲染中文」这一整条路径。
+    #[test]
+    fn legacy_language_names_normalize_to_bcp47() {
+        assert_eq!(resolve_locale("Chinese").to_string(), "zh-CN");
+        assert_eq!(resolve_locale("chinese").to_string(), "zh-CN");
+        assert_eq!(resolve_locale("中文").to_string(), "zh-CN");
+        assert_eq!(resolve_locale("简体中文").to_string(), "zh-CN");
+        assert_eq!(resolve_locale("English").to_string(), "en-US");
+        assert_eq!(resolve_locale("英文").to_string(), "en-US");
+        assert_eq!(resolve_locale("Japanese").to_string(), "ja");
+        assert_eq!(resolve_locale("日本語").to_string(), "ja");
+
+        let manager = I18nManager::init(Some("Chinese".to_string()))
+            .expect("自然语言名规范化失败不应让 init 失败");
+        assert_eq!(
+            manager.get_message("not_git_repo", None),
+            "❌ 当前目录不是 Git 仓库"
+        );
+    }
+
+    /// 协商层依赖的 `matches` 语义，逐条钉死，外加协商层的落点。
+    ///
+    /// `unic_langid` 的 `matches` 把 `self` 当成带通配的「范围」：范围里缺省的
+    /// 脚本/地区子标签是通配符。协商时内嵌词干当范围、请求标签当具体值，
+    /// 即 `词干.matches(请求, true, false)`。这三条正是协商正确性的全部前提：
+    ///
+    /// - 脚本缺省不算约束：`zh-CN` 覆盖 `zh-Hans-CN`（语言、地区一致，脚本只在请求侧）；
+    /// - `zh-CN` **不**覆盖 `zh-Hant-TW`：两标签地区不同（CN≠TW）——所以繁体不会被
+    ///   静默塞给简体，落到 en-US 是预期内的；
+    /// - `en-US` 不覆盖 `en-GB`：地区不同（US≠GB）。
+    #[test]
+    fn negotiate_matches_semantics() {
+        let zh_cn = langid!("zh-CN");
+        assert!(zh_cn.matches(&langid!("zh-Hans-CN"), true, false));
+        assert!(!zh_cn.matches(&langid!("zh-Hant-TW"), true, false));
+        assert!(!langid!("en-US").matches(&langid!("en-GB"), true, false));
+
+        // 协商层的落点：能映射的映射，映射不了的原样返回（交给回退链，不得回归）。
+        assert_eq!(negotiate_locale(&langid!("zh-Hans-CN")), langid!("zh-CN"));
+        assert_eq!(
+            negotiate_locale(&langid!("zh-Hant-TW")),
+            langid!("zh-Hant-TW")
+        );
+        assert_eq!(negotiate_locale(&langid!("en-GB")), langid!("en-GB"));
     }
 
     #[test]
