@@ -405,6 +405,93 @@ mod tests {
         );
     }
 
+    /// 所有对空白敏感的键，逐字节对齐原字面量。
+    ///
+    /// 这是本次改造里最容易**静默**出错的地方：Fluent 会吃掉值的行首、行尾空白，
+    /// 所以前导空格得写成 `{"   "}`、结尾空格得写成 `{" "}`。写错不会有任何报错，
+    /// 只是终端里少几个空格、或者用户敲 y 时提示语贴着光标。上面那条测试只覆盖了
+    /// 其中一个键，这里把剩下的全部钉住。
+    ///
+    /// 期望值直接抄自 key-manifest 的 original literal 列（原字面量逐字拷贝）。
+    #[test]
+    fn whitespace_sensitive_keys_match_their_original_literals() {
+        let manager = I18nManager::init(Some("zh-CN".to_string())).unwrap();
+        let args = |pairs: &[(&str, FluentValue<'static>)]| {
+            pairs
+                .iter()
+                .map(|(name, value)| ((*name).to_string(), value.clone()))
+                .collect::<HashMap<String, FluentValue<'static>>>()
+        };
+
+        // 三个前导空格的提示行
+        assert_eq!(
+            manager.get_message("strict_format_blocked_hint", None),
+            "   可先用 --dry-run 预览，或在 config.json 中设置 strict_format=false"
+        );
+        assert_eq!(
+            manager.get_message("debug_hint", None),
+            "   提示: 加 --debug 查看完整原始响应，或在 config.json 中调大 max_tokens"
+        );
+        assert_eq!(
+            manager.get_message("block_details", Some(&args(&[("blocks", "3, 5".into())]))),
+            "   降级的块: 3, 5"
+        );
+        assert_eq!(
+            manager.get_message(
+                "chunk_progress",
+                Some(&args(&[("index", 1usize.into()), ("total", 3usize.into())]))
+            ),
+            "   [块 1/3] 正在生成摘要..."
+        );
+
+        // 一个前导空格
+        assert_eq!(manager.get_message("chunk_complete", None), " 完成");
+        assert_eq!(
+            manager.get_message("chunk_degraded", None),
+            " ⚠️ 已降级为本地结构化摘要"
+        );
+
+        // `⚠️` 后面是两个空格——不是一个，也不是三个
+        assert_eq!(
+            manager.get_message("format_validation_failed", None),
+            "⚠️  格式验证失败，请检查"
+        );
+        assert_eq!(
+            manager.get_message(
+                "validation_issues",
+                Some(&args(&[("issue", "消息为空".into())]))
+            ),
+            "⚠️  消息为空"
+        );
+
+        // 结尾空格是值的一部分：用户在提示语后面直接敲 y/n/e
+        assert_eq!(
+            manager.get_message("edit_message_prompt", None),
+            "是否使用此消息提交？(y/n/e 编辑): "
+        );
+
+        // 结尾的 `\n` **不是**值的一部分，留在调用处（main.rs 的 format! 里补）
+        assert_eq!(
+            manager.get_message(
+                "fallback_more_files",
+                Some(&args(&[("count", 1usize.into())]))
+            ),
+            "- …（其余 1 个文件略）"
+        );
+
+        // 多行值：Fluent 会剥掉多行值的行首缩进，`chore:` 后面那个空行必须还在
+        assert_eq!(
+            manager.get_message(
+                "fallback_message",
+                Some(&args(&[
+                    ("count", 2usize.into()),
+                    ("body", "- M  a.rs\n".into())
+                ]))
+            ),
+            "chore: 更新 2 个文件\n\n- M  a.rs\n（本条消息由本地降级逻辑生成：模型未返回内容）"
+        );
+    }
+
     /// zh/en 键集对齐：zh 里的每个键都必须在 en-US 里存在。
     ///
     /// 少一个键不会报错，只会在运行时悄悄回退成 key 本身——所以这条要在测试里拦。
