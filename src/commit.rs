@@ -1,3 +1,4 @@
+use crate::i18n::{t, t_args};
 use anyhow::Result;
 use colored::*;
 use regex::Regex;
@@ -23,7 +24,7 @@ pub fn validate_commit_message(message: &str) -> Validation {
     let lines: Vec<&str> = message.lines().collect();
 
     if lines.is_empty() || lines[0].trim().is_empty() {
-        problems.push("消息为空".to_string());
+        problems.push(t("empty_message"));
         return Validation { problems };
     }
 
@@ -37,9 +38,9 @@ pub fn validate_commit_message(message: &str) -> Validation {
 
     let re = Regex::new(&pattern).unwrap();
     if !re.is_match(header) {
-        problems.push(format!(
-            "标题格式不正确: {} （期望 <type>(<scope>): <subject>）",
-            header
+        problems.push(t_args(
+            "invalid_header_format",
+            &[("header", header.into())],
         ));
     }
 
@@ -52,13 +53,16 @@ pub fn validate_commit_message(message: &str) -> Validation {
     if let Some((_, subject)) = header.split_once(':') {
         let subject_len = subject.trim().chars().count();
         if subject_len > 50 {
-            problems.push(format!("Subject 超过50字符: {}", subject_len));
+            problems.push(t_args(
+                "subject_too_long",
+                &[("length", subject_len.into())],
+            ));
         }
     }
 
     // 检查 body 格式
     if lines.len() >= 2 && !lines[1].trim().is_empty() {
-        problems.push("标题和 body 之间需要有空行".to_string());
+        problems.push(t("missing_blank_line"));
     }
 
     Validation { problems }
@@ -67,26 +71,28 @@ pub fn validate_commit_message(message: &str) -> Validation {
 /// 把校验问题打印给用户。
 pub fn print_validation(validation: &Validation) {
     for problem in &validation.problems {
-        eprintln!("{}", format!("⚠️  {problem}").yellow());
+        // `problem` 本身已经是本地化过的校验问题，这里只是给它套上提示前缀
+        eprintln!(
+            "{}",
+            t_args("validation_issues", &[("issue", problem.as_str().into())]).yellow()
+        );
     }
 }
 
 pub fn commit_with_confirmation(message: &str, auto: bool) -> Result<()> {
     if auto {
-        println!("{}", "🚀 自动提交...".blue());
+        println!("{}", t("commit_confirmation").blue());
         crate::git::commit_with_message(message)?;
-        println!("{}", "✅ 提交成功！".green());
+        println!("{}", t("commit_success").green());
         return Ok(());
     }
 
     // 显示消息让用户确认
     println!("\n{}", "=".repeat(70).yellow());
-    println!(
-        "{}",
-        "📝 生成的 Commit 消息 (Conventional + Body)：".green()
-    );
+    println!("{}", t("commit_message_banner").green());
 
-    print!("\n是否使用此消息提交？(y/n/e 编辑): ");
+    // 键值里没有开头那个换行，它属于排版，留在调用处
+    print!("\n{}", t("edit_message_prompt"));
     io::stdout().flush()?;
 
     let mut input = String::new();
@@ -96,21 +102,21 @@ pub fn commit_with_confirmation(message: &str, auto: bool) -> Result<()> {
     match input.as_str() {
         "y" => {
             crate::git::commit_with_message(message)?;
-            println!("{}", "✅ 提交成功！".green());
+            println!("{}", t("commit_success").green());
             Ok(())
         }
         "e" => {
             let edited = edit_message(message)?;
             if let Some(edited_msg) = edited {
                 crate::git::commit_with_message(&edited_msg)?;
-                println!("{}", "✅ 提交成功！".green());
+                println!("{}", t("commit_success").green());
             } else {
-                println!("{}", "已取消提交".yellow());
+                println!("{}", t("commit_cancelled").yellow());
             }
             Ok(())
         }
         _ => {
-            println!("{}", "已取消提交".yellow());
+            println!("{}", t("commit_cancelled").yellow());
             Ok(())
         }
     }
@@ -126,7 +132,7 @@ fn edit_message(message: &str) -> Result<Option<String>> {
     let status = std::process::Command::new(&editor).arg(&path).status()?;
 
     if !status.success() {
-        anyhow::bail!("编辑器退出异常");
+        anyhow::bail!(t("editor_exit_error"));
     }
 
     let content = std::fs::read_to_string(&path)?;
@@ -141,7 +147,7 @@ fn edit_message(message: &str) -> Result<Option<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_commit_message;
+    use super::{t, validate_commit_message};
 
     #[test]
     fn accepts_chinese_subject_under_50_chars() {
@@ -189,6 +195,9 @@ mod tests {
     /// 校验必须能给出可读的问题描述（strict_format 要把它们展示给用户）
     #[test]
     fn reports_every_problem() {
+        // 校验问题现在是本地化文案，断言中文就得先钉住 zh-CN（R7）
+        crate::i18n::pin_test_locale();
+
         let message = "随便写的标题\n- 紧跟着的 body";
         let validation = validate_commit_message(message);
 
@@ -203,9 +212,23 @@ mod tests {
 
     #[test]
     fn rejects_empty_message() {
+        crate::i18n::pin_test_locale();
+
         let validation = validate_commit_message("");
 
         assert!(!validation.ok());
         assert!(validation.problems[0].contains("消息为空"));
+    }
+
+    /// 确认提示语结尾那个空格是原文的一部分（用户在提示后面直接敲 y/n/e），
+    /// 而开头那个换行不是——它是排版，留在调用处的 `print!("\n{}", ...)` 里。
+    #[test]
+    fn confirmation_prompt_keeps_its_trailing_space() {
+        crate::i18n::pin_test_locale();
+
+        assert_eq!(
+            t("edit_message_prompt"),
+            "是否使用此消息提交？(y/n/e 编辑): "
+        );
     }
 }

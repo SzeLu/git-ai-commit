@@ -193,6 +193,18 @@ fn manager() -> &'static I18nManager {
     MANAGER.get().unwrap_or(&UNINSTALLED)
 }
 
+/// 测试固定 locale（R7）。
+///
+/// 断言的是「按 zh-CN 渲染出的那句话」时，必须先把进程 locale 钉死：`init(None)`
+/// 会去读宿主机的系统 locale，结果随机器而变。`OnceLock` 是 set-once 的，而一个
+/// 测试二进制只有一个进程、多个线程——所以全局只能钉一种语言：所有调用方都请求
+/// zh-CN，先到的那个赢，与线程调度无关；若哪个测试改请求别的语言，套件立刻变成
+/// 顺序相关的。
+#[cfg(test)]
+pub(crate) fn pin_test_locale() {
+    install(Some("zh-CN".to_string()));
+}
+
 /// 把配置或系统给出的语言串解析成 locale。
 ///
 /// 解析不了就退回 en-US（spec §4 那条链的最后一格）。**配置值走这里，系统检测值

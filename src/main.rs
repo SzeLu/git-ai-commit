@@ -14,6 +14,8 @@ use clap::Parser;
 use colored::*;
 use std::io::{self, Write};
 
+use crate::i18n::{t, t_args};
+
 fn prompt_input(prompt: &str) -> String {
     print!("{} ", prompt);
     io::stdout().flush().unwrap();
@@ -61,27 +63,32 @@ async fn main() -> Result<()> {
     // 读取配置文件，支持多模型列表与选定模型
     let mut config = config::Config::load().unwrap_or_default();
 
+    // 装载界面语言。必须在这里、在**任何输出之前**：晚一步的话，先打印的消息
+    // 拿不到资源，只会把 key 原样吐出来。语言来自配置，配置没写则由 i18n
+    // 走系统 locale（spec §4 的优先级链）。
+    i18n::install(config.language.clone());
+
     // 没有可用模型（首次运行、配置损坏、或 selected_model 指向已删除的条目）时
     // 交互式补齐。这里往已读到的配置里合并，而不是新建一份，避免把配置文件里
     // 其它模型一起冲掉。
     if config.active_model().is_none() {
-        println!("❌ 配置中没有可用的模型，需手动输入模型信息");
-        let model = prompt_input("请输入模型名称 (e.g., deepseek-chat):");
+        println!("{}", t("config_model_required"));
+        let model = prompt_input(&t("model_input_prompt"));
         // Validate input: model, base_url, and api_token must not be empty
         if model.trim().is_empty() {
-            eprintln!("❌ 模型名称不能为空。终止操作。");
+            eprintln!("{}", t("model_name_validation"));
             std::process::exit(1);
         }
-        let base_url = prompt_input("请输入模型 API URL:");
+        let base_url = prompt_input(&t("base_url_input_prompt"));
         // Validate input: base_url must not be empty
         if base_url.trim().is_empty() {
-            eprintln!("❌ 模型 API URL 不能为空。终止操作。");
+            eprintln!("{}", t("base_url_validation"));
             std::process::exit(1);
         }
-        let api_token = prompt_input("请输入 API Token:");
+        let api_token = prompt_input(&t("api_token_input_prompt"));
         // Validate input: api_token must not be empty
         if api_token.trim().is_empty() {
-            eprintln!("❌ API Token 不能为空。终止操作。");
+            eprintln!("{}", t("api_token_validation"));
             std::process::exit(1);
         }
 
@@ -98,34 +105,41 @@ async fn main() -> Result<()> {
         config.selected_model = model;
 
         if let Err(e) = config.save() {
-            eprintln!("❌ 保存配置失败: {}", e);
+            eprintln!(
+                "{}",
+                t_args("save_config_error", &[("error", e.to_string().into())])
+            );
         }
     }
 
     // 打印当前实际生效的大模型
     // （`selected_model` 可能已失效而回退到兼容字段 `model`，所以要显示解析结果）
-    let model_config = config.active_model().context("配置中没有可用的模型")?;
-    println!("📌 当前使用的大模型: {}", model_config.model.red());
+    let model_config = config.active_model().context(t("no_active_model_error"))?;
+    // 红色只加在模型名上，所以先着色再作为变量传进去，整行不能着色
+    println!(
+        "{}",
+        t_args(
+            "current_model_label",
+            &[("model", model_config.model.red().to_string().into())]
+        )
+    );
 
     // 检查是否在 Git 仓库中
     if !git::is_git_repo()? {
-        eprintln!("{}", "❌ 当前目录不是 Git 仓库".red());
+        eprintln!("{}", t("not_git_repo").red());
         std::process::exit(1);
     }
 
     // 获取变更
-    println!("{}", "📊 分析代码变更...".blue());
+    println!("{}", t("analyzing_changes").blue());
     let diff = git::get_git_diff(cli.all)?;
 
     if diff.is_empty() {
         if cli.all {
-            eprintln!("{}", "❌ 没有检测到任何变更".red());
+            eprintln!("{}", t("no_changes_detected").red());
         } else {
-            eprintln!(
-                "{}",
-                "❌ 没有检测到暂存的变更，请先使用 'git add' 添加文件".red()
-            );
-            eprintln!("   或使用 --all 参数包含所有变更");
+            eprintln!("{}", t("staged_changes_required").red());
+            eprintln!("{}", t("use_all_flag_hint"));
         }
         std::process::exit(1);
     }
@@ -136,7 +150,7 @@ async fn main() -> Result<()> {
     let repo_info = git::get_repo_info()?;
 
     // 生成 commit 消息
-    println!("{}", "🤖 正在分析变更...".blue());
+    println!("{}", t("generating_message").blue());
     let generated = generate_message(
         &config,
         model_config,
@@ -153,22 +167,22 @@ async fn main() -> Result<()> {
 
     if cli.dry_run {
         println!("\n{}", "=".repeat(70).yellow());
-        println!("{}", "📝 生成的 Commit 消息 (Dry Run)：".green());
+        println!("{}", t("dry_run_label").green());
         println!("{}", "=".repeat(70).yellow());
         println!("{}", generated.text);
         println!("{}", "=".repeat(70).yellow());
 
         commit::print_validation(&validation);
         if validation.ok() {
-            println!("{}", "✅ 格式验证通过".green());
+            println!("{}", t("format_validation_passed").green());
         } else {
-            println!("{}", "⚠️  格式验证失败，请检查".yellow());
+            println!("{}", t("format_validation_failed").yellow());
         }
         return Ok(());
     }
 
     if !cli.auto && config.auto_commit {
-        println!("{}", "⚙️  config.json 中 auto_commit=true，跳过确认".blue());
+        println!("{}", t("config_auto_commit").blue());
     }
 
     // 格式校验前置到提交之前。`strict_format` 决定失败时是阻断还是仅提示。
@@ -179,32 +193,20 @@ async fn main() -> Result<()> {
 
         if config.strict_format {
             if auto {
-                eprintln!(
-                    "{}",
-                    "❌ 生成的 commit 消息未通过格式校验（strict_format = true），已阻止提交".red()
-                );
-                eprintln!("   可先用 --dry-run 预览，或在 config.json 中设置 strict_format=false");
+                eprintln!("{}", t("strict_format_blocked").red());
+                eprintln!("{}", t("strict_format_blocked_hint"));
                 std::process::exit(1);
             }
-            eprintln!(
-                "{}",
-                "⚠️  strict_format = true，但当前是交互模式，是否提交由你决定".yellow()
-            );
+            eprintln!("{}", t("format_warning_strict").yellow());
         } else {
-            eprintln!(
-                "{}",
-                "⚠️  格式校验未通过（strict_format = false，仍可提交）".yellow()
-            );
+            eprintln!("{}", t("format_warning_nonstrict").yellow());
         }
     }
 
     // 降级消息绝不自动提交
     let auto = should_auto_commit(auto, generated.degraded);
     if !auto && (cli.auto || config.auto_commit) {
-        eprintln!(
-            "{}",
-            "⚠️  本次为降级消息（模型未正常返回），强制走确认流程".yellow()
-        );
+        eprintln!("{}", t("degraded_confirmation_required").yellow());
     }
 
     commit::commit_with_confirmation(&generated.text, auto)?;
@@ -230,7 +232,7 @@ async fn generate_message(
     let language = config.language.as_deref().unwrap_or("zh-CN");
 
     if diff.len() <= threshold {
-        println!("{}", "⚡ 变更规模适中，正在实时生成提交消息...".green());
+        println!("{}", t("short_diff_generating").green());
 
         let context = ai::CommitContext {
             diff,
@@ -252,10 +254,7 @@ async fn generate_message(
         });
     }
 
-    println!(
-        "{}",
-        "⚠️  变更内容较长，正在采用“分块总结 -> 合并 -> 生成”机制进行处理...".yellow()
-    );
+    println!("{}", t("long_diff_warning").yellow());
     let chunks = chunk::split_into_chunks(diff, threshold);
 
     // 记录 (块序号, 失败原因)，用于最后汇总提示
@@ -267,7 +266,10 @@ async fn generate_message(
     for (i, piece) in chunks.iter().enumerate() {
         let index = i + 1;
         let total = chunks.len();
-        let label = format!("第 {index}/{total} 块摘要");
+        let label = t_args(
+            "chunk_summary",
+            &[("index", index.into()), ("total", total.into())],
+        );
 
         // 无论摘要成功与否都要算出结构信息：既做兜底素材，也用来推进续段状态
         let digest = chunk::local_chunk_digest(piece, last_file.as_deref());
@@ -275,7 +277,13 @@ async fn generate_message(
             last_file = Some(file.path.clone());
         }
 
-        print!("   [块 {index}/{total}] 正在生成摘要...");
+        print!(
+            "{}",
+            t_args(
+                "chunk_progress",
+                &[("index", index.into()), ("total", total.into())]
+            )
+        );
         io::stdout().flush()?;
 
         match ai::generate_summary(
@@ -292,7 +300,7 @@ async fn generate_message(
                     "### 块 {index}/{total}（模型摘要）\n{}",
                     summary.trim()
                 ));
-                println!("{}", " 完成".green());
+                println!("{}", t("chunk_complete").green());
             }
             Err(err) => {
                 // 第一次失败就把完整诊断打出来——里面有帧统计、finish_reason
@@ -306,7 +314,7 @@ async fn generate_message(
                     "### 块 {index}/{total}（本地结构化摘要，模型未能生成）\n[块 {index}/{total} 本地摘要] {}",
                     digest.render()
                 ));
-                println!("{}", " ⚠️ 已降级为本地结构化摘要".yellow());
+                println!("{}", t("chunk_degraded").yellow());
             }
         }
     }
@@ -314,10 +322,12 @@ async fn generate_message(
     if !degraded_blocks.is_empty() {
         eprintln!(
             "{}",
-            format!(
-                "⚠️  有 {}/{} 块使用了本地降级摘要，最终消息质量可能下降",
-                degraded_blocks.len(),
-                chunks.len()
+            t_args(
+                "degradation_warning",
+                &[
+                    ("count", degraded_blocks.len().into()),
+                    ("total", chunks.len().into())
+                ]
             )
             .yellow()
         );
@@ -326,9 +336,12 @@ async fn generate_message(
                 .iter()
                 .map(|(index, _)| index.to_string())
                 .collect();
-            eprintln!("   降级的块: {}", blocks.join(", "));
+            eprintln!(
+                "{}",
+                t_args("block_details", &[("blocks", blocks.join(", ").into())])
+            );
         }
-        eprintln!("   提示: 加 --debug 查看完整原始响应，或在 config.json 中调大 max_tokens");
+        eprintln!("{}", t("debug_hint"));
     }
 
     let custom_prompt = format!(
@@ -357,7 +370,7 @@ async fn generate_message(
         language
     );
 
-    println!("{}", "✍️  正在生成最终提交消息...".blue());
+    println!("{}", t("final_message").blue());
     match ai::generate_commit_message_custom_prompt(
         model_config,
         language,
@@ -375,7 +388,11 @@ async fn generate_message(
             // 最终生成也失败：用本地信息兜底，工具仍然可用
             eprintln!(
                 "{}",
-                format!("⚠️  最终生成失败，改用本地兜底消息：{}", first_line(&err)).yellow()
+                t_args(
+                    "final_generation_failed",
+                    &[("error", first_line(&err).into())]
+                )
+                .yellow()
             );
             Ok(GeneratedMessage {
                 text: local_fallback_message(status),
@@ -398,13 +415,23 @@ fn local_fallback_message(status: &str) -> String {
         body.push_str(&format!("- {line}\n"));
     }
     if files.len() > 20 {
-        body.push_str(&format!("- …（其余 {} 个文件略）\n", files.len() - 20));
+        // 键值里没有末尾换行，行尾的 \n 是排版，留在调用处
+        body.push_str(&format!(
+            "{}\n",
+            t_args(
+                "fallback_more_files",
+                &[("count", (files.len() - 20).into())]
+            )
+        ));
     }
 
-    format!(
-        "chore: 更新 {} 个文件\n\n{}（本条消息由本地降级逻辑生成：模型未返回内容）",
-        files.len().max(1),
-        body
+    t_args(
+        "fallback_message",
+        &[
+            // `chore:` 前缀在译文里也保持原样：commit.rs 的校验只认这些 type
+            ("count", files.len().max(1).into()),
+            ("body", body.into()),
+        ],
     )
 }
 
@@ -423,8 +450,8 @@ fn first_line(err: &anyhow::Error) -> String {
     err.to_string()
         .lines()
         .next()
-        .unwrap_or("未知错误")
-        .to_string()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| t("unknown_error"))
 }
 
 /// 流式增量文本的默认输出方式。
@@ -462,6 +489,9 @@ mod tests {
 
     #[test]
     fn fallback_message_is_conventional_and_lists_files() {
+        // 下面断言的是中文原文，先把进程 locale 钉到 zh-CN（R7）
+        crate::i18n::pin_test_locale();
+
         let message = local_fallback_message("M  src/ai.rs\nA  src/chunk.rs\n");
 
         // 必须能通过格式校验，否则会被 strict_format 拦下
@@ -474,8 +504,35 @@ mod tests {
         assert!(message.contains("本地降级"));
     }
 
+    /// 兜底消息的行形状必须和原来的字面量逐字节一致。
+    ///
+    /// 这条消息是**要写进仓库的**，而 Fluent 会吃掉多行值的行首空白——`chore:` 后面
+    /// 那个空行、以及「其余 N 个文件略」那一行的结尾换行，都得原样落下来。
+    #[test]
+    fn fallback_message_keeps_the_original_line_shape() {
+        crate::i18n::pin_test_locale();
+
+        let message = local_fallback_message("M  src/ai.rs\nA  src/chunk.rs\n");
+        assert_eq!(
+            message,
+            "chore: 更新 2 个文件\n\n- M  src/ai.rs\n- A  src/chunk.rs\n\
+             （本条消息由本地降级逻辑生成：模型未返回内容）"
+        );
+
+        // 超过 20 个文件时，「其余 N 个」那一行的结尾换行留在调用处，不能丢
+        let many: String = (1..=21).map(|i| format!("M  f{i}.rs\n")).collect();
+        let message = local_fallback_message(&many);
+        assert!(
+            message.contains("- …（其余 1 个文件略）\n（本条消息由本地降级逻辑生成"),
+            "{message}"
+        );
+    }
+
     #[test]
     fn fallback_message_survives_empty_status() {
+        // 兜底消息与校验问题的文案都随 locale 变，钉住 zh-CN 让这条与其它测试同语言
+        crate::i18n::pin_test_locale();
+
         let message = local_fallback_message("");
 
         assert!(
