@@ -528,6 +528,10 @@ where
     let model_config = config
         .active_model()
         .context("No active model configured. Please run with --model or set it in config.json")?;
+    // 语言是 `Option`：`Config::load()` 一定会补上，退回缺省值只是防御，
+    // 避免 prompt 里出现空语言名。
+    let language = config.language.as_deref().unwrap_or("zh-CN");
+
     let prompt = format!(
         r#"你是一个专业的 Git commit 消息生成专家。请根据以下代码变更生成一个符合 Conventional Commits 规范且包含详细 Body 的 commit 消息。
 
@@ -576,13 +580,13 @@ where
         context.status,
         context.diff,
         commit_types.join(", "),
-        config.language,
+        language,
     );
 
     stream_chat_completion(
         model_config,
         vec![
-            Message::system(system_prompt(&config.language)),
+            Message::system(system_prompt(language)),
             Message::user(&prompt),
         ],
         params,

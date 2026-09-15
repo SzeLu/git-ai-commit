@@ -20,7 +20,9 @@ regex = "1.0"
 tempfile = "3.0"
 futures-util = "0.3"
 fluent = "0.16"
-intl-memoizer = "0.8"
+# FluentBundle::new 收 Vec<LanguageIdentifier>，而 fluent 没有 re-export 这个类型，
+# 只能直接依赖 unic-langid（版本必须与 fluent-bundle 内部使用的一致，否则类型不通用）。
+unic-langid = "0.9"
 sys-locale = "0.3"
 
 [profile.release]

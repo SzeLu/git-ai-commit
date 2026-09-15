@@ -7,8 +7,8 @@ use std::path::PathBuf;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
     /// 默认语言（用于 Prompt 模板）
-    #[serde(default = "default_language")]
-    pub language: String,
+    #[serde(default)]
+    pub language: Option<String>,
     /// 默认使用的模型名称（兼容旧配置）
     #[serde(default = "default_model")]
     pub model: String,
@@ -47,8 +47,8 @@ pub struct GenParams {
     pub temperature: f32,
 }
 
-fn default_language() -> String {
-    "English".to_string()
+fn default_language() -> Option<String> {
+    Some("zh-CN".to_string())
 }
 
 fn default_model() -> String {
@@ -116,8 +116,23 @@ impl Config {
     /// 首次运行由调用方交互式补齐后再 `save`。
     pub fn load() -> Option<Self> {
         let config_path = Self::get_config_path().ok()?;
+        // 语言缺省时补系统 locale（spec §4 的第 2 优先级）。`sys_locale::get_locale`
+        // 返回 `Option` 而不是 `Result`，拿不到才退回 en-US。
+        if !config_path.exists() {
+            let mut config = Config::default();
+            if let Some(locale) = sys_locale::get_locale() {
+                config.language = Some(locale);
+            }
+            return Some(config);
+        }
+
         let content = std::fs::read_to_string(config_path).ok()?;
-        serde_json::from_str(&content).ok()
+        let mut config: Config = serde_json::from_str(&content).ok()?;
+
+        if config.language.is_none() {
+            config.language = Some(sys_locale::get_locale().unwrap_or_else(|| "en-US".to_string()));
+        }
+        Some(config)
     }
 
     /// 当前生效的模型配置。
@@ -270,12 +285,22 @@ mod tests {
         assert_eq!(config.final_params().temperature, 0.4);
     }
 
-    /// 语言字段：缺省为 English。
+    /// 语言字段：缺省为 zh-CN（中文优先），显式配置则以配置为准。
     #[test]
     fn language_defaults_and_accepts_legacy_typo() {
-        assert_eq!(Config::default().language, "English");
-        assert_eq!(parse(r#"{"language": "Japanese"}"#).language, "Japanese");
-        assert_eq!(parse(r#"{"language": "Chinese"}"#).language, "Chinese");
+        assert_eq!(Config::default().language.as_deref(), Some("zh-CN"));
+        assert_eq!(
+            parse(r#"{"language": "Japanese"}"#).language.as_deref(),
+            Some("Japanese")
+        );
+        assert_eq!(
+            parse(r#"{"language": "Chinese"}"#).language.as_deref(),
+            Some("Chinese")
+        );
+        // 配置文件里没写 language 时必须留空：`#[serde(default)]` 只负责给出 None，
+        // 由 `load()` 再填系统 locale。若这里改成 `default = "default_language"`，
+        // 就会把 spec §4「配置 > 系统 locale」的优先级倒过来。
+        assert_eq!(parse(r#"{"models": {}}"#).language, None);
     }
 
     #[test]

@@ -222,6 +222,9 @@ async fn generate_message(
     repo_info: &git::RepoInfo,
 ) -> Result<GeneratedMessage> {
     let threshold = config.chunk_threshold;
+    // `Config::load()` 必定补上语言，为 `None` 只可能是直接构造的配置；
+    // 退回 `Config::default()` 的缺省值，免得 prompt 里出现空语言名。
+    let language = config.language.as_deref().unwrap_or("zh-CN");
 
     if diff.len() <= threshold {
         println!("{}", "⚡ 变更规模适中，正在实时生成提交消息...".green());
@@ -274,7 +277,7 @@ async fn generate_message(
 
         match ai::generate_summary(
             model_config,
-            &config.language,
+            language,
             piece,
             config.summary_params(),
             &label,
@@ -348,13 +351,13 @@ async fn generate_message(
         diff_stats,
         status,
         sections.join("\n\n"),
-        config.language
+        language
     );
 
     println!("{}", "✍️  正在生成最终提交消息...".blue());
     match ai::generate_commit_message_custom_prompt(
         model_config,
-        &config.language,
+        language,
         &custom_prompt,
         config.final_params(),
         print_delta,
