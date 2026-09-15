@@ -5,6 +5,9 @@ mod commit;
 mod config;
 mod debug;
 mod git;
+// 用 `pub` 修饰：i18n 的调用点要到「替换硬编码文案」那一步才接进来，
+// 私有模块会让整块尚未被调用的 API 触发 dead_code 警告。
+pub mod i18n;
 
 use anyhow::{Context, Result};
 use clap::Parser;
