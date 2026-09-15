@@ -19,6 +19,9 @@ dirs = "5.0"
 regex = "1.0"
 tempfile = "3.0"
 futures-util = "0.3"
+fluent = "0.16"
+intl-memoizer = "0.8"
+sys-locale = "0.3"
 
 [profile.release]
 lto = true
