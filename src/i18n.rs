@@ -86,10 +86,7 @@ impl I18nManager {
     /// 常见默认值，一个命令行工具不该因为读不懂一个语言串就拒绝运行。这时退回
     /// en-US，也就是 spec §4 那条链的最后一格。
     pub fn init(config_language: Option<String>) -> Result<Self, I18nError> {
-        let requested = config_language
-            .filter(|language| !language.trim().is_empty())
-            .or_else(sys_locale::get_locale)
-            .unwrap_or_else(|| FALLBACK_LOCALE.to_string());
+        let requested = requested_locale(config_language, sys_locale::get_locale());
 
         let locale = resolve_locale(&requested);
 
@@ -203,6 +200,22 @@ fn manager() -> &'static I18nManager {
 #[cfg(test)]
 pub(crate) fn pin_test_locale() {
     install(Some("zh-CN".to_string()));
+}
+
+/// spec §4 的优先级：配置值 → 系统 locale → en-US。
+///
+/// 「检测」这一步作为参数传进来（`init` 传 `sys_locale::get_locale()`），而不是
+/// 在函数体里直接调用：不这样抽，第三格就只能靠「断言 `init(None)` 的结果和
+/// `init(sys_locale::get_locale())` 的结果相等」间接验证，而宿主机恰好就是期望
+/// 语言时那条对拍恒真——等于没测。抽出来之后三级优先级可以逐格钉死。
+///
+/// 空白配置按「没配」处理：`"language": "  "` 若被当成有效值送进 [`resolve_locale`]，
+/// 会解析失败退回 en-US，把系统 locale 这一格整个盖掉。
+fn requested_locale(config_language: Option<String>, detected: Option<String>) -> String {
+    config_language
+        .filter(|language| !language.trim().is_empty())
+        .or(detected)
+        .unwrap_or_else(|| FALLBACK_LOCALE.to_string())
 }
 
 /// 把配置或系统给出的语言串解析成 locale。
@@ -344,6 +357,47 @@ mod tests {
         assert_eq!(msg, "Hello, World!");
     }
 
+    /// locale 选择的优先级，逐格对齐 spec §4：配置值 → 系统 locale → en-US。
+    ///
+    /// 这一格（以及下一条）是 Phase 4 里「locale selection」那半：`init` 的两端都被
+    /// 真实 `.ftl` 覆盖着（`test_hello_*` / `test_unparseable_locale_falls_back_to_en_us`
+    /// 走的是完整链路），这里补的是**三级之间谁压谁**——尤其是空白配置这一格，
+    /// 它必须等于「没配」，否则会盖掉系统 locale。
+    #[test]
+    fn locale_selection_follows_the_spec_priority() {
+        // 1. 配了就用配置的，系统 locale 插手不了
+        assert_eq!(
+            requested_locale(Some("zh-CN".to_string()), Some("fr-FR".to_string())),
+            "zh-CN"
+        );
+        // 2. 没配才轮到系统 locale
+        assert_eq!(requested_locale(None, Some("fr-FR".to_string())), "fr-FR");
+        // 3. 空白配置等于没配
+        assert_eq!(
+            requested_locale(Some("   ".to_string()), Some("fr-FR".to_string())),
+            "fr-FR"
+        );
+        // 4. 系统 locale 也给不出东西时落到链尾
+        assert_eq!(requested_locale(None, None), "en-US");
+    }
+
+    /// 不可用的语言串落到 en-US，不阻断启动。
+    ///
+    /// `requested_locale` 只挑出字符串，能不能变成一个 locale 由 `resolve_locale`
+    /// 决定——两段合起来才是 spec §4 那条链的最后一格。配置值与系统检测值走的是
+    /// 同一个入口，所以两边的落点都必须一致。
+    #[test]
+    fn unusable_language_strings_land_on_en_us() {
+        assert_eq!(
+            resolve_locale(&requested_locale(Some("C".to_string()), None)).to_string(),
+            "en-US"
+        );
+        assert_eq!(
+            resolve_locale(&requested_locale(None, Some("C".to_string()))).to_string(),
+            "en-US"
+        );
+    }
+
     #[test]
     fn test_missing_key() {
         let manager = I18nManager::init(Some("en-US".to_string())).unwrap();
@@ -412,12 +466,25 @@ mod tests {
     /// 只是终端里少几个空格、或者用户敲 y 时提示语贴着光标。上面那条测试只覆盖了
     /// 其中一个键，这里把剩下的全部钉住。
     ///
-    /// 期望值直接抄自 key-manifest 的 original literal 列（原字面量逐字拷贝）。
+    /// 期望值直接抄自 key-manifest 的 original literal 列（原字面量逐字拷贝）；
+    /// 带插值的键比的是**渲染结果**，不是 `{ $count }` 这样的原始模式——后者会让
+    /// 断言恒真（`{ $count } != 3` 永远成立）。
     ///
-    /// 覆盖面的边界写在这里，免得这条测试再被当成它没做到的东西：钉住的是
-    /// **已经走 `t()` 的那部分界面**（main.rs / commit.rs / 本地兜底）里所有对空白
-    /// 敏感的键。ai.rs 的 `report_*` 与 `no_content_error` 还是硬编码，它们的 `{"  "}`
-    /// 缩进没在这里钉——等 ai.rs 接进来时一并补，别以为这里已经盖住了。
+    /// 覆盖面的定义写清楚，免得这条测试再被当成它没做到的东西：**值里带首尾空格、
+    /// 或含连续两个及以上空格的键**（`{"  "}` 这种占位符按它代表的空格算）。
+    /// `locales/zh-CN.ftl` 与 `locales/en-US.ftl` 里各 28 个，键名一一对应，
+    /// 本测试把 28 个**全部**钉住——所以这一类是完备覆盖，不是「挑了几个重要的」。
+    /// 复核方式：`grep -cE '=.*(  |\{"[ ]*"\})' locales/zh-CN.ftl` 得 27，
+    /// 余下 1 个是 `no_content_error`，它那两个空格写在**续行**上（第 100 行）。
+    /// 末尾三条是**反向**属性——「值首尾不能有空格」——它们的值里本来就没有空格，
+    /// 因此不在这 28 个里，单独钉是为了另一件事（见那段注释）。
+    ///
+    /// 一点边界，之前写成「只有中文这一格会中招」，那句是错的：`locales/en-US.ftl`
+    /// 里同样有 `⚠️` 后面两个空格的值，也同样走那几处 println!，在英文值里多写一个
+    /// `{" "}` 会把空格翻倍得一模一样。准确的说法是「本守卫目前只读 **zh-CN** 这一格」。
+    /// 两个文件的**键集**由 `zh_cn_keys_are_all_present_in_en_us` 守，
+    /// **值的空白形状只钉了 zh-CN**；要连 en-US 一起钉，得让本测试对两个 manager
+    /// 各跑一遍——那件事没做，别以为做了。
     #[test]
     fn whitespace_sensitive_keys_match_their_original_literals() {
         let manager = I18nManager::init(Some("zh-CN".to_string())).unwrap();
@@ -429,6 +496,10 @@ mod tests {
         };
 
         // 三个前导空格的提示行
+        assert_eq!(
+            manager.get_message("use_all_flag_hint", None),
+            "   或使用 --all 参数包含所有变更"
+        );
         assert_eq!(
             manager.get_message("strict_format_blocked_hint", None),
             "   可先用 --dry-run 预览，或在 config.json 中设置 strict_format=false"
@@ -529,9 +600,137 @@ mod tests {
             "⚠️  最终生成失败，改用本地兜底消息：连接超时"
         );
 
+        // ── ai.rs 接进来之后补上的那一批 ────────────────────────────────────
+        // `report()` 的每一行都以两个空格缩进，两条诊断/提示行也是。这些键以前是
+        // 硬编码字面量，不在上面的范围里；ai.rs 改走 t()/t_args() 之后它们上了真实
+        // 界面，于是必须一起钉住——否则「守卫盖住了这一类」这句话在 ai.rs 落地的那一刻
+        // 就不再成立。
+        assert_eq!(
+            manager.get_message(
+                "report_endpoint",
+                Some(&args(&[
+                    ("endpoint", "http://127.0.0.1:1/v1".into()),
+                    ("model", "test-model".into())
+                ]))
+            ),
+            "  端点: http://127.0.0.1:1/v1   模型: test-model"
+        );
+        // 温度按**渲染后的字符串**传（`report()` 里就是 `.to_string()`）：Fluent 内部
+        // 把数值统一走 f64，`0.7f32` 会渲染成 `0.699999988079071`。这里若写成
+        // `0.7f32.into()`，这条断言就和真实调用点脱节了。
+        assert_eq!(
+            manager.get_message(
+                "report_request",
+                Some(&args(&[
+                    ("max_tokens", 64u32.into()),
+                    ("temperature", "0.7".into()),
+                    ("status", 200u16.into())
+                ]))
+            ),
+            "  请求: max_tokens=64 temperature=0.7   HTTP 200"
+        );
+        assert_eq!(
+            manager.get_message(
+                "report_frames",
+                Some(&args(&[
+                    ("total", 3usize.into()),
+                    ("data", 2usize.into()),
+                    ("heartbeat", 1usize.into()),
+                    ("parse_failures", 0usize.into())
+                ]))
+            ),
+            "  帧: 共 3（data 2 / 其他 1）  解析失败 0"
+        );
+        assert_eq!(
+            manager.get_message(
+                "report_content_frames",
+                Some(&args(&[
+                    ("content_frames", 1usize.into()),
+                    ("content_chars", 4usize.into()),
+                    ("reasoning_frames", 2usize.into()),
+                    ("reasoning_chars", 9usize.into())
+                ]))
+            ),
+            "  含 content 的帧 1（4 字）   含推理内容的帧 2（9 字）"
+        );
+        assert_eq!(
+            manager.get_message(
+                "report_finish_reason",
+                Some(&args(&[
+                    ("reason", "length".into()),
+                    ("done", "已收到".into())
+                ]))
+            ),
+            "  finish_reason: length   [DONE]: 已收到"
+        );
+        assert_eq!(
+            manager.get_message(
+                "report_stream_error",
+                Some(&args(&[("error", "{\"code\":503}".into())]))
+            ),
+            "  流内错误: {\"code\":503}"
+        );
+        assert_eq!(
+            manager.get_message(
+                "report_diagnosis",
+                Some(&args(&[(
+                    "diagnosis",
+                    "网关在流中返回了 error 对象".into()
+                )]))
+            ),
+            "  诊断: 网关在流中返回了 error 对象"
+        );
+        assert_eq!(
+            manager.get_message(
+                "report_raw_frame",
+                Some(&args(&[
+                    ("index", 1usize.into()),
+                    ("frame", "{\"choices\":[]}".into())
+                ]))
+            ),
+            "  原始片段 1: {\"choices\":[]}"
+        );
+        // 这两个空格在**续行**上：Fluent 剥掉续行的缩进后，值自己带的 `{"  "}`
+        // 才是那两格——它不在 grep 的首行命中里，靠形状扫描才看得见。
+        assert_eq!(
+            manager.get_message(
+                "no_content_error",
+                Some(&args(&[(
+                    "body",
+                    "生成 commit 消息失败：模型没有返回任何内容".into()
+                )]))
+            ),
+            "生成 commit 消息失败：模型没有返回任何内容\n  提示: 加 --debug 查看完整原始响应；或在 config.json 中调整 max_tokens"
+        );
+        // 下面三条同样是「`⚠️`/`✍️` 后面两个空格」，但它们既不在上面那组，
+        // 也不在 main.rs/commit.rs 里：`truncated_output_warning` 属于 ai.rs，
+        // `config_auto_commit` 与 `final_message` 在 main.rs。上一轮的边界注释
+        // 只点名了 `report_*` 和 `no_content_error`，漏掉了 `truncated_output_warning`。
+        assert_eq!(
+            manager.get_message(
+                "truncated_output_warning",
+                Some(&args(&[
+                    ("what", "生成 commit 消息".into()),
+                    ("limit", 64u32.into())
+                ]))
+            ),
+            "⚠️  生成 commit 消息的模型输出在 max_tokens=64 处被截断，内容可能不完整"
+        );
+        assert_eq!(
+            manager.get_message("config_auto_commit", None),
+            "⚙️  config.json 中 auto_commit=true，跳过确认"
+        );
+        assert_eq!(
+            manager.get_message("final_message", None),
+            "✍️  正在生成最终提交消息..."
+        );
+
         // 反向属性：下面这三个提示语的值**首尾都不能有空格**。用户在提示语后面看到的
         // 那个空格是调用处补的（main.rs:22 的 `print!("{} ", prompt)`）；值里再写一个
-        // `{" "}`，终端上就变成两个空格——静默，且只有中文这一格会中招。
+        // `{" "}`，终端上就变成两个空格——静默，而且**不是只有中文会中招**：
+        // en-US.ftl:12,14,16 那三个值走的是同一个 `print!("{} ", prompt)`，
+        // 在英文值里加一个空格是一样的翻倍效果。这句以前写成「只有中文这一格会中招」，
+        // 那是把「本守卫只读 zh-CN」说成了「只有 zh-CN 有问题」。
         // 钉的依旧是原字面量本身：原字面量的结尾没有空格。
         assert_eq!(
             manager.get_message("model_input_prompt", None),
