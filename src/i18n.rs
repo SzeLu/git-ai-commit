@@ -1,8 +1,9 @@
 // src/i18n.rs
 //!
-//! 轻量 i18n：从 `locales/*.ftl` 读取 Fluent 资源，按「精确 locale → 主语言 → en-US」
-//! 逐级回退（spec §5.1）。整条链都取不到时返回 key 本身——这样即使翻译缺失，
-//! 界面也只会露出 key，而不会 panic 或输出空白。
+//! 轻量 i18n：从**内嵌**进二进制的 Fluent 资源（`locales/*.ftl`，见 `LOCALE_SOURCES`）
+//! 里取文案，按「精确 locale → 主语言 → en-US」逐级回退（spec §5.1）。
+//! 整条链都取不到时返回 key 本身——这样即使翻译缺失，界面也只会露出 key，
+//! 而不会 panic 或输出空白。
 
 use crate::debug;
 // 用 `concurrent::FluentBundle`（memoizer 内部是 Mutex）而不是默认的
@@ -13,31 +14,58 @@ use fluent::concurrent::FluentBundle;
 use fluent::{FluentResource, FluentValue};
 use std::collections::HashMap;
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::OnceLock;
 use unic_langid::{langid, LanguageIdentifier};
 
 /// 回退链的最后一格。
 const FALLBACK_LOCALE: &str = "en-US";
 
-/// 资源目录。这里按当前工作目录解析，与 CLI 从仓库根运行的既有约定一致；
-/// 不做资源内嵌或路径探测——那不在本计划范围内。
-const LOCALES_DIR: &str = "locales";
+/// 内嵌的语言资源：文件名词干 → `.ftl` 源文本（spec §6「或打包进二进制分发」）。
+///
+/// 以前这里是个 `LOCALES_DIR = "locales"` 常量，靠 `Path::new(LOCALES_DIR)` 在运行期
+/// 读盘——那是**相对当前工作目录**解析的。而 `install.sh` 只把可执行文件拷进
+/// `~/.local/bin`，工具又是借全局别名 `git aic` 在**用户自己的仓库**里跑的：那一刻
+/// 的工作目录是用户的仓库，`./locales/` 根本不是我们的目录，回退链每一级都落空，
+/// 界面上只剩裸 key（`git aic` 打出 `not_git_repo` 而不是 `❌ 当前目录不是 Git 仓库`）。
+/// 测试看不见这个缺陷，因为 `cargo test` 的工作目录恰好是仓库根，`locales/` 就在那儿。
+/// 内嵌之后资源的来源与运行位置无关，这一整类故障才算了结。
+///
+/// 只做内嵌，**不做**「先读盘、读不到再退回内嵌」：很多用户仓库自带 `locales/` 目录，
+/// 磁盘优先会让用户自己的同名文件（比如他的 `locales/zh-CN.ftl`）盖掉我们的资源，
+/// 中文静默失效——那比「找不到」难查得多。
+///
+/// 顺序无关；但新增 `.ftl` **必须**同步加进这张表，漏了就只是二进制里没有那个文件
+/// （`load_bundle` 把它当成「这一级没有资源」），不会有任何编译或运行期报错。
+const LOCALE_SOURCES: &[(&str, &str)] = &[
+    ("zh-CN", include_str!("../locales/zh-CN.ftl")),
+    ("en-US", include_str!("../locales/en-US.ftl")),
+    ("fr", include_str!("../locales/fr.ftl")),
+    ("fr-US", include_str!("../locales/fr-US.ftl")),
+];
+
+/// 按文件名词干取内嵌的源文本；表里没有这一级就是 `None`。
+fn locale_source(stem: &str) -> Option<&'static str> {
+    LOCALE_SOURCES
+        .iter()
+        .find(|(name, _)| *name == stem)
+        .map(|(_, source)| *source)
+}
 
 /// i18n 初始化失败的原因。
 ///
-/// 这里只有「资源本身坏了」才叫失败。以下两种情况都**不算失败**：
-/// `locales/` 目录或某个具体 `.ftl` 不存在（这一级回退没内容，链路继续往下走），
-/// 以及语言标签解析不了（退回 en-US，见 [`I18nManager::init`]）。
+/// 只有「链的底板那一格坏了」才算失败。以下情况都**不算失败**：某个 `.ftl`
+/// 没进 `LOCALE_SOURCES`（这一级回退没内容，链路继续往下走）、某一格语法不合法
+/// （跳过它，链路继续往下走，见 [`I18nManager::init`]）、以及语言标签解析不了
+/// （退回 en-US）。三种情况都不该让一个命令行工具拒绝启动。
+///
+/// 内嵌之后不再有「文件存在但读不出来」这一格：内容在编译期就进了二进制，
+/// 运行期没有任何读盘动作，能坏的只剩语法——而那意味着我们自己发布了一份坏资源，
+/// 属于构建期就该被发现的问题。
 #[derive(Debug)]
 pub enum I18nError {
-    /// `.ftl` 存在但语法不合法
+    /// 内嵌的 `.ftl` 语法不合法。`path` 是这份内容的检出源头，仅用于报错定位。
     FtlParse { path: PathBuf, errors: Vec<String> },
-    /// `.ftl` 存在但读不出来
-    Io {
-        path: PathBuf,
-        source: std::io::Error,
-    },
 }
 
 impl fmt::Display for I18nError {
@@ -49,21 +77,11 @@ impl fmt::Display for I18nError {
                 path.display(),
                 errors.join("; ")
             ),
-            Self::Io { path, source } => {
-                write!(f, "读取语言文件 {} 失败: {source}", path.display())
-            }
         }
     }
 }
 
-impl std::error::Error for I18nError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io { source, .. } => Some(source),
-            _ => None,
-        }
-    }
-}
+impl std::error::Error for I18nError {}
 
 /// 按优先级持有多级语言资源。
 ///
@@ -85,17 +103,17 @@ impl I18nManager {
     /// 标签解析不了**不阻断启动**：`LANG=C` / `LC_ALL=C` 是 Docker、CI、cron 的
     /// 常见默认值，一个命令行工具不该因为读不懂一个语言串就拒绝运行。这时退回
     /// en-US，也就是 spec §4 那条链的最后一格。
+    ///
+    /// 某一格**坏了**（内嵌的 `.ftl` 语法不合法）只跳过这一格，链路继续往下走：
+    /// 整条链一起丢掉的后果是连 en-US 底板都没了，用户会看到满屏裸 key，
+    /// 比少一级回退严重得多。只有底板自己坏掉才是真的失败——那是链的最后一格，
+    /// 它没了就无处可落。这一段的取舍见 [`load_chain`]。
     pub fn init(config_language: Option<String>) -> Result<Self, I18nError> {
         let requested = requested_locale(config_language, sys_locale::get_locale());
 
         let locale = resolve_locale(&requested);
 
-        let mut bundles = Vec::new();
-        for (stem, bundle_locale) in fallback_chain(&locale) {
-            if let Some(bundle) = load_bundle(&stem, &bundle_locale)? {
-                bundles.push(bundle);
-            }
-        }
+        let bundles = load_chain(fallback_chain(&locale), load_bundle)?;
 
         Ok(Self { bundles })
     }
@@ -248,27 +266,70 @@ fn fallback_chain(locale: &LanguageIdentifier) -> Vec<(String, LanguageIdentifie
     chain
 }
 
+/// 逐级加载整条回退链，把「单格坏了怎么办」这一个决策收在一处。
+///
+/// 单格坏掉（内嵌的 `.ftl` 语法不合法）只是**跳过**这一格，链路继续往下走：丢掉
+/// 整条链等于连 en-US 底板一起丢，用户看到的是满屏裸 key，比少一级回退严重得多。
+/// 只有底板（`FALLBACK_LOCALE`）自己坏掉才返回 `Err`——它是链的最后一格，没有
+/// 「再往下」可言。
+///
+/// 收成一个函数、把「怎么加载一格」做成参数，是为了让上面这条决策可被测试：
+/// 内嵌之后坏资源只能来自一份写坏的 `.ftl`，而那种文件在测试里造不出来
+/// （测试不能改 `locales/`），不把 loader 抽出来，这个分支就只能靠读代码相信。
+fn load_chain<F>(
+    chain: Vec<(String, LanguageIdentifier)>,
+    loader: F,
+) -> Result<Vec<FluentBundle<FluentResource>>, I18nError>
+where
+    F: Fn(&str, &LanguageIdentifier) -> Result<Option<FluentBundle<FluentResource>>, I18nError>,
+{
+    let mut bundles = Vec::new();
+    for (stem, bundle_locale) in chain {
+        match loader(&stem, &bundle_locale) {
+            Ok(Some(bundle)) => bundles.push(bundle),
+            // 这一级没有资源：空缺，往下走。
+            Ok(None) => {}
+            Err(err) => {
+                if stem == FALLBACK_LOCALE {
+                    return Err(err);
+                }
+                // 跳过的这一格不阻断启动，但也不该无声无息：--debug 下留一句原因，
+                // 免得「某一级悄悄没生效」变成只能靠肉眼比对界面才发现的事。
+                // （不新增 I18nError 变体去携带逐级细节——spec §7.1 定了形状。）
+                if debug::enabled() {
+                    eprintln!("[debug] i18n: 跳过坏掉的语言资源 {stem}.ftl: {err}");
+                }
+            }
+        }
+    }
+
+    Ok(bundles)
+}
+
 /// 加载一个文件名词干对应的 `.ftl`。
 ///
-/// 文件不存在返回 `Ok(None)`——这一级回退空缺，让链路继续往下走。
+/// 资源是内嵌的，所以这里只有两种结果：表里没有这个文件名词干（`Ok(None)`，
+/// 表示这一级回退空缺，链路继续往下走），或者内嵌的源文本解析不了（`Err`，
+/// 由 [`load_chain`] 决定是跳过还是失败）。
 fn load_bundle(
     stem: &str,
     locale: &LanguageIdentifier,
 ) -> Result<Option<FluentBundle<FluentResource>>, I18nError> {
-    let path = Path::new(LOCALES_DIR).join(format!("{stem}.ftl"));
-    if !path.is_file() {
+    let Some(source) = locale_source(stem) else {
         return Ok(None);
-    }
+    };
 
-    let source = std::fs::read_to_string(&path).map_err(|source| I18nError::Io {
-        path: path.clone(),
-        source,
-    })?;
+    // 报错时依旧要指出是哪个文件：内嵌之后没有真实路径可指，但 `locales/<stem>.ftl`
+    // 就是这份内容的检出源头，要改的是它。
+    let path = PathBuf::from(format!("locales/{stem}.ftl"));
 
-    let resource = FluentResource::try_new(source).map_err(|(_, errors)| I18nError::FtlParse {
-        path: path.clone(),
-        errors: errors.iter().map(ToString::to_string).collect(),
-    })?;
+    // FluentResource 收的是 String（源文本要活到资源里），内嵌的是 &'static str，
+    // 于是这里有一次拷贝——每个 `.ftl` 每次 init 一次，只在进程启动时发生。
+    let resource =
+        FluentResource::try_new(source.to_string()).map_err(|(_, errors)| I18nError::FtlParse {
+            path: path.clone(),
+            errors: errors.iter().map(ToString::to_string).collect(),
+        })?;
 
     let mut bundle = FluentBundle::new_concurrent(vec![locale.clone()]);
     // 关掉双向文本隔离符（FSI/PDI）：那是给 HTML 用的，落到终端里既看不见，
@@ -355,6 +416,47 @@ mod tests {
 
         let msg = manager.get_message("hello", Some(&args));
         assert_eq!(msg, "Hello, World!");
+    }
+
+    /// 一格的坏资源只丢自己，不该丢掉整条链；只有底板坏掉才是真的失败。
+    ///
+    /// 内嵌之后「坏资源」只能来自一份写坏的 `.ftl`，而测试不许改 `locales/`，
+    /// 所以这条借 `load_chain` 的 loader 参数来造：给 `zh-CN` 那一格喂一个解析错误，
+    /// 结果里必须仍然有 en-US 底板——界面走英文，而不是满屏裸 key。
+    /// （断言英文而不是「非空」是有意的：如果跳过的格子仍然进了 bundles，
+    /// 这里拿到的会是中文。）
+    #[test]
+    fn a_broken_rung_is_skipped_and_only_a_broken_base_is_fatal() {
+        let broken = |stem: &str| I18nError::FtlParse {
+            path: PathBuf::from(format!("locales/{stem}.ftl")),
+            errors: vec!["写坏的资源".to_string()],
+        };
+
+        let manager = I18nManager {
+            bundles: load_chain(fallback_chain(&langid!("zh-CN")), |stem, locale| {
+                if stem == "zh-CN" {
+                    return Err(broken(stem));
+                }
+                load_bundle(stem, locale)
+            })
+            .expect("非基底那一格坏掉不该让整条链失败"),
+        };
+        assert_eq!(
+            manager.get_message("not_git_repo", None),
+            "❌ The current directory is not a Git repository"
+        );
+
+        // 底板自己坏掉：它是链的最后一格，没有「再往下」可言，这才是真的失败。
+        let result = load_chain(fallback_chain(&langid!("zh-CN")), |stem, locale| {
+            if stem == FALLBACK_LOCALE {
+                return Err(broken(stem));
+            }
+            load_bundle(stem, locale)
+        });
+        assert!(
+            result.is_err(),
+            "en-US 底板坏掉必须返回 Err，否则界面只会剩下 key"
+        );
     }
 
     /// locale 选择的优先级，逐格对齐 spec §4：配置值 → 系统 locale → en-US。
@@ -459,7 +561,7 @@ mod tests {
         );
     }
 
-    /// 所有对空白敏感的键，逐字节对齐原字面量。
+    /// 所有对空白敏感的键，逐字节对齐原字面量；键集本身由派生保证完备。
     ///
     /// 这是本次改造里最容易**静默**出错的地方：Fluent 会吃掉值的行首、行尾空白，
     /// 所以前导空格得写成 `{"   "}`、结尾空格得写成 `{" "}`。写错不会有任何报错，
@@ -470,21 +572,21 @@ mod tests {
     /// 带插值的键比的是**渲染结果**，不是 `{ $count }` 这样的原始模式——后者会让
     /// 断言恒真（`{ $count } != 3` 永远成立）。
     ///
-    /// 覆盖面的定义写清楚，免得这条测试再被当成它没做到的东西：**值里带首尾空格、
-    /// 或含连续两个及以上空格的键**（`{"  "}` 这种占位符按它代表的空格算）。
-    /// `locales/zh-CN.ftl` 与 `locales/en-US.ftl` 里各 28 个，键名一一对应，
-    /// 本测试把 28 个**全部**钉住——所以这一类是完备覆盖，不是「挑了几个重要的」。
-    /// 复核方式：`grep -cE '=.*(  |\{"[ ]*"\})' locales/zh-CN.ftl` 得 27，
-    /// 余下 1 个是 `no_content_error`，它那两个空格写在**续行**上（第 100 行）。
-    /// 末尾三条是**反向**属性——「值首尾不能有空格」——它们的值里本来就没有空格，
-    /// 因此不在这 28 个里，单独钉是为了另一件事（见那段注释）。
+    /// 正类的定义：**值的首或尾有空格，或含连续两个及以上空格**（`{"  "}` 这种占位符
+    /// 按它代表的空格算）。定义写死在这里没用——「这一类共 N 个」这种完备性声明靠手写
+    /// 维护，在本分支上已经错过两次（先是漏了整类，补完又漏了 `truncated_output_warning`），
+    /// 两次都是测试全绿而覆盖面小于它自称的范围。所以覆盖面的**计算**交给
+    /// `derived_whitespace_sensitive_keys`：从 `.ftl` 源文本现算一遍，再断言它与
+    /// `WHITESPACE_SENSITIVE_PINS` **双向相等**——漏钉一个（源里新加了一个带双空格的
+    /// 值）和多钉一个（钉了一个其实不敏感的键）都会让本测试红。下面逐条的
+    /// `assert_eq!` 查的是**内容**（那几个空格的字节形状对不对），派生查的是**覆盖面**
+    /// （该查的键一个不少），两件事互不替代。
     ///
-    /// 一点边界，之前写成「只有中文这一格会中招」，那句是错的：`locales/en-US.ftl`
-    /// 里同样有 `⚠️` 后面两个空格的值，也同样走那几处 println!，在英文值里多写一个
-    /// `{" "}` 会把空格翻倍得一模一样。准确的说法是「本守卫目前只读 **zh-CN** 这一格」。
-    /// 两个文件的**键集**由 `zh_cn_keys_are_all_present_in_en_us` 守，
-    /// **值的空白形状只钉了 zh-CN**；要连 en-US 一起钉，得让本测试对两个 manager
-    /// 各跑一遍——那件事没做，别以为做了。
+    /// 因此本测试现在的完备性是可执行的，而不是自称的；`en-US.ftl` 的值仍然**没有**
+    /// 被这样覆盖：本测试只读 zh-CN 这一格（`locales/en-US.ftl` 里同样有 `⚠️` 后两个
+    /// 空格的值，多写一个 `{" "}` 会一样地把空格翻倍）。两个文件的键集由
+    /// `zh_cn_keys_are_all_present_in_en_us` 守；要连 en-US 的空白形状一起钉，
+    /// 得让本测试对两个 manager 各跑一遍——那件事没做，别以为做了。
     #[test]
     fn whitespace_sensitive_keys_match_their_original_literals() {
         let manager = I18nManager::init(Some("zh-CN".to_string())).unwrap();
@@ -494,6 +596,8 @@ mod tests {
                 .map(|(name, value)| ((*name).to_string(), value.clone()))
                 .collect::<HashMap<String, FluentValue<'static>>>()
         };
+        // 派生集合要在下面几处断言里用到，且必须和逐条断言读同一份源文本。
+        let derived = derived_whitespace_sensitive_keys(&read_locale("zh-CN"), &manager);
 
         // 三个前导空格的提示行
         assert_eq!(
@@ -725,6 +829,35 @@ mod tests {
             "✍️  正在生成最终提交消息..."
         );
 
+        // ── 覆盖面：派生集合 vs 钉子集合，双向断言 ──────────────────────────
+        // 上面逐条的 assert_eq! 证明了「钉住的那些值确实是对的」；这一段证明
+        // 「该钉的都在上面」。缺任何一边，这类回归都还能从缝里溜过去：
+        // 只在源里新加一个带双空格的值（派生有、没钉）→ unpinned 非空；
+        // 或把一个键从敏感改成不敏感、或钉了一个根本不属于正类的键
+        // （钉了、派生说不是）→ overpinned 非空。
+        let pinned: BTreeSet<String> = WHITESPACE_SENSITIVE_PINS
+            .iter()
+            .map(|key| (*key).to_string())
+            .collect();
+        let unpinned: Vec<&String> = derived.difference(&pinned).collect();
+        let overpinned: Vec<&String> = pinned.difference(&derived).collect();
+        assert!(
+            unpinned.is_empty() && overpinned.is_empty(),
+            "空白敏感键的钉子与派生结果不一致：\n  派生有、没钉（新增了敏感值却没钉住）: {unpinned:?}\n  钉了、派生说不是（钉子已过期或不属于正类）: {overpinned:?}"
+        );
+
+        // 另外两个被钉的键不属于空白敏感正类，它们是为**换行形状**钉的
+        // （多行值里那个空行、`{ $body }` 在去缩进之后落在哪里）。显式断言它们
+        // 不在派生集合里：不写的话，读者无法区分「派生正确地排除了它们」和
+        // 「派生漏算了它们」——而本守卫存在的理由正是「漏算看不出来」。
+        for key in NEWLINE_SHAPE_PINS {
+            assert!(
+                !derived.contains(*key),
+                "{key} 的值首尾没有空格、也没有连续两个空格，不该出现在空白敏感集合里；\
+                 它是为换行形状钉的，若它真的落在正类里，说明值被改成了另一种形状（或者派生坏了）"
+            );
+        }
+
         // 反向属性：下面这三个提示语的值**首尾都不能有空格**。用户在提示语后面看到的
         // 那个空格是调用处补的（main.rs:22 的 `print!("{} ", prompt)`）；值里再写一个
         // `{" "}`，终端上就变成两个空格——静默，而且**不是只有中文会中招**：
@@ -743,6 +876,53 @@ mod tests {
         assert_eq!(
             manager.get_message("api_token_input_prompt", None),
             "请输入 API Token:"
+        );
+        // 反向属性也要钉住**它是反向的**：这三条不属于正类这件事本身要断言出来。
+        // 否则哪天有人给其中一个值补了个 `{" "}`，正类会多出这一条（unpinned 报红，
+        // 还算能发现），但要是派生或谓词写反了、把整类都算漏，这里仍会静静通过——
+        // 显式断言让「正类必须不含它们」这句话本身可执行。
+        for key in NO_EDGE_SPACE_PROMPTS {
+            assert!(
+                !derived.contains(*key),
+                "{key} 的值首尾必须没有空格，却被算进了空白敏感集合"
+            );
+        }
+    }
+
+    /// 派生器自身的自证：对着 Fluent 那两条最容易算错的规则各钉一个例子。
+    ///
+    /// 上面那条测试的结论完全建立在「派生集合算得对」上——如果派生把该敏感的值漏掉，
+    /// 它就只是在和一个同样漏掉的手写列表互相印证。这里不依赖真实 `.ftl`，用一段
+    /// 合成源文本把判据本身钉死：源里多出一个敏感值，派生就必须多出那个键。
+    #[test]
+    fn whitespace_derivation_follows_fluent_rules() {
+        // 规则一：`{"  "}` 这类字面量占位符按它代表的空格数算（值被渲染出来才有形状），
+        // 所以 `{"  "}x` 是敏感值，而 `x { $v } y` 不是（单个空格）。
+        // 规则二：续行先按公共缩进（这里是 2）去缩进，`      third` 比公共缩进多出来的
+        // 那 4 个空格**会留下**，于是这个多行值同样是敏感值。
+        // 最后一条是反向的例子：值以变量结尾时，不能因为「变量渲染成空串」而凭空
+        // 多出一个结尾空格——变量要喂不含空白的哨兵值。
+        let source = concat!(
+            "placeable_spaces = {\"  \"}x\n",
+            "continuation_extra = first\n  second\n      third\n",
+            "plain_single_space = x { $v } y\n",
+            "variable_at_end = x { $v }\n",
+        );
+
+        let resource = FluentResource::try_new(source.to_string()).unwrap();
+        let mut bundle = FluentBundle::new_concurrent(vec![langid!("zh-CN")]);
+        bundle.set_use_isolating(false);
+        bundle.add_resource(resource).unwrap();
+        let manager = I18nManager {
+            bundles: vec![bundle],
+        };
+
+        assert_eq!(
+            derived_whitespace_sensitive_keys(source, &manager),
+            BTreeSet::from([
+                "continuation_extra".to_string(),
+                "placeable_spaces".to_string()
+            ])
         );
     }
 
@@ -789,9 +969,48 @@ mod tests {
         manager.bundles.iter().any(|bundle| bundle.has_message(key))
     }
 
+    /// 读一个 locale 的 `.ftl` 源文本——**与二进制里内嵌的是同一份字节**。
+    ///
+    /// 以前这里读盘（`{LOCALES_DIR}/{locale}.ftl`）：那既可能校验到与发布内容不同的
+    /// 东西（磁盘上被改过、或 CWD 根本不是仓库根），又会在 CWD 变化时直接 panic。
+    /// 指向 `LOCALE_SOURCES` 之后，校验的就是真正会被加载的那份内容，
+    /// 本测试因此不再依赖「测试是在仓库根跑的」这个前提。
     fn read_locale(locale: &str) -> String {
-        std::fs::read_to_string(format!("{LOCALES_DIR}/{locale}.ftl"))
-            .unwrap_or_else(|err| panic!("读不到 locales/{locale}.ftl: {err}"))
+        locale_source(locale)
+            .unwrap_or_else(|| panic!("LOCALE_SOURCES 里没有 {locale}，新增 .ftl 时要同步加进去"))
+            .to_string()
+    }
+
+    /// `LOCALE_SOURCES` 必须与 `locales/` 目录一一对应。
+    ///
+    /// 漏登记一个 `.ftl` 不会有任何报错：那个文件只是没进二进制，`load_bundle` 会把
+    /// 整格当成「这一级没有资源」——正是本任务要根除的那种静默失败（界面照常显示，
+    /// 只是某种语言永远命不中）。所以这里直接对目录断言一次，让「记得同步」这件事
+    /// 由测试来说，而不是由注释来说。
+    ///
+    /// 路径取 `CARGO_MANIFEST_DIR`（编译期常量）而不是相对路径：上面 `read_locale`
+    /// 刚刚才甩掉「测试必须在仓库根跑」这个前提，不能从这里再加回来。这里读的只是
+    /// **文件名**，校验内容仍然是内嵌那份。
+    #[test]
+    fn locale_sources_covers_every_ftl_file_on_disk() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("locales");
+
+        let on_disk: BTreeSet<String> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|err| panic!("读不到 {}: {err}", dir.display()))
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .filter_map(|name| name.strip_suffix(".ftl").map(str::to_string))
+            .collect();
+
+        let embedded: BTreeSet<String> = LOCALE_SOURCES
+            .iter()
+            .map(|(stem, _)| (*stem).to_string())
+            .collect();
+
+        assert_eq!(
+            on_disk, embedded,
+            "locales/ 与 LOCALE_SOURCES 不一致：磁盘上有、表里没有的文件在发布版里永远取不到"
+        );
     }
 
     /// 从 `.ftl` 源文本里扫出顶层消息 ID。
@@ -809,6 +1028,120 @@ mod tests {
             .filter_map(|line| line.split_once('='))
             .map(|(id, _)| id.trim().to_string())
             .filter(|id| !id.is_empty())
+            .collect()
+    }
+
+    /// 「对空白敏感」的定义：值的首或尾有空格，或含连续两个及以上空格。
+    fn has_sensitive_whitespace(value: &str) -> bool {
+        value.starts_with(' ') || value.ends_with(' ') || value.contains("  ")
+    }
+
+    /// 从 `.ftl` 源文本里收集所有变量名（`$name`）。
+    ///
+    /// 派生空白形状时要先把变量喂上一个**不含空白**的哨兵值，否则渲染结果里会混进
+    /// 与这条消息的形状无关的东西：
+    /// - 取不到值的变量，Fluent 会把 `{$name}` 原样写进结果（见 fluent-bundle 的
+    ///   `VariableReference` 分支），那不是值的形状，还可能贴出一个假的双空格；
+    /// - 喂空串同样不行：值以变量结尾时（`…大模型: { $model }`），空串会凭空造出
+    ///   一个结尾空格。
+    ///
+    /// 所以扫描只负责「有哪些变量」，值一律给 `"x"`：不引入空白，也不漏掉变量。
+    /// 这不是在解析 FTL，只是按 `$` 起头的标识符扫一遍名字。
+    fn ftl_variables(source: &str) -> Vec<String> {
+        let is_name_start = |b: u8| b.is_ascii_alphabetic() || b == b'_';
+        let bytes = source.as_bytes();
+        let mut names: Vec<String> = Vec::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'$' && i + 1 < bytes.len() && is_name_start(bytes[i + 1]) {
+                let start = i + 1;
+                let end = bytes[start..]
+                    .iter()
+                    .position(|b| !(b.is_ascii_alphanumeric() || *b == b'_'))
+                    .map_or(bytes.len(), |offset| start + offset);
+                let name = &source[start..end];
+                if !names.iter().any(|known| known == name) {
+                    names.push(name.to_string());
+                }
+                i = end;
+            } else {
+                i += 1;
+            }
+        }
+        names
+    }
+
+    /// 对空白敏感的键的**钉子**：下面逐字节断言其值的那一批。
+    ///
+    /// 这个列表只声明「我钉了哪些」；「该钉哪些」由 `derived_whitespace_sensitive_keys`
+    /// 从 `.ftl` 源文本现算，测试断言两者相等。手写的完备性声明在本分支上已经错过两次
+    /// （`truncated_output_warning` 漏过一轮），所以这里不再自称完备——记在下面 28 条
+    /// 里的每一条都在正类的定义之内，反过来正类里的每一条也都在这里。
+    const WHITESPACE_SENSITIVE_PINS: &[&str] = &[
+        "block_details",
+        "chunk_complete",
+        "chunk_degraded",
+        "chunk_progress",
+        "config_auto_commit",
+        "debug_hint",
+        "degradation_warning",
+        "degraded_confirmation_required",
+        "edit_message_prompt",
+        "final_generation_failed",
+        "final_message",
+        "format_validation_failed",
+        "format_warning_nonstrict",
+        "format_warning_strict",
+        "long_diff_warning",
+        "no_content_error",
+        "report_content_frames",
+        "report_diagnosis",
+        "report_endpoint",
+        "report_finish_reason",
+        "report_frames",
+        "report_raw_frame",
+        "report_request",
+        "report_stream_error",
+        "strict_format_blocked_hint",
+        "truncated_output_warning",
+        "use_all_flag_hint",
+        "validation_issues",
+    ];
+
+    /// 为**换行形状**而钉、但不属于空白敏感正类的两个键。
+    ///
+    /// 它们的值首尾没有空格、也没有连续两个空格，所以派生集合正确地不含它们；
+    /// 它们被钉住是因为另一件事——多行值里那个空行、以及续行去缩进之后 `{ $body }`
+    /// 落在哪里。两种属性混在一起时，「不在派生集合里」这件事必须写出来，
+    /// 否则读者分不清它是被漏算了还是本来就不该算。
+    const NEWLINE_SHAPE_PINS: &[&str] = &["fallback_more_files", "fallback_message"];
+
+    /// 反向属性的三个键：值的首尾**不能**有空格。
+    ///
+    /// 与正类是不同的谓词——正类是「必须有空格」，这里是「必须没有」，所以要显式钉住，
+    /// 不能靠「派生集合恰好没算进来」代替（那样一旦派生写反了，这里也静默通过）。
+    const NO_EDGE_SPACE_PROMPTS: &[&str] = &[
+        "model_input_prompt",
+        "base_url_input_prompt",
+        "api_token_input_prompt",
+    ];
+
+    /// 从 `.ftl` 源文本**派生**出对空白敏感的键集。
+    ///
+    /// 为什么让 Fluent 自己渲染一遍、而不是在源文本上正则扫：这条判据里有两个问题
+    /// 只有解析器答得上来——`{"   "}` 这类字面量占位符要按它代表的空格数算；
+    /// 多行值的续行会先按公共缩进做一次去缩进，**而比公共缩进多出来的那部分会留下**。
+    /// 自己照着重写一遍这两条规则，写错的表现恰好是「少算了几个键」——也就是本守卫
+    /// 存在的理由本身。渲染一次等于把解析器的答案直接拿来用，规则不会走样。
+    fn derived_whitespace_sensitive_keys(source: &str, manager: &I18nManager) -> BTreeSet<String> {
+        let args: HashMap<String, FluentValue<'static>> = ftl_variables(source)
+            .into_iter()
+            .map(|name| (name, FluentValue::from("x")))
+            .collect();
+
+        ftl_keys(source)
+            .into_iter()
+            .filter(|key| has_sensitive_whitespace(&manager.get_message(key, Some(&args))))
             .collect()
     }
 }
