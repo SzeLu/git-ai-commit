@@ -1,4 +1,5 @@
 // src/config.rs
+use crate::i18n::t;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -176,7 +177,13 @@ impl Config {
     }
 
     fn get_config_path() -> Result<PathBuf> {
-        let home = dirs::home_dir().context("无法获取 home 目录")?;
+        // 这里用 `with_context`（惰性）而不是 `context`（立即求值）：本函数是
+        // `Config::load()` 的一部分，而 `main()` 必须先从配置里读到 `language`
+        // 才能调用 `i18n::install()`——也就是说**语言就绪之前**这条语句已经跑过了。
+        // 立即求值会在这段窗口里把 `t()` 的结果钉成 key 本身，最后用户看到
+        // `home_dir_error` 而不是「无法获取 home 目录」。推迟到真出错的那一刻
+        // 才取文案，语言必然已经装好。
+        let home = dirs::home_dir().with_context(|| t("home_dir_error"))?;
         Ok(home.join(".git-ai-commit").join("config.json"))
     }
 }

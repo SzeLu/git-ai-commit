@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::{self, GenParams};
 use crate::debug;
 use crate::git::RepoInfo;
+use crate::i18n::{t, t_args};
 
 /// 构造 commit 消息生成的 system prompt。
 ///
@@ -165,73 +166,112 @@ pub(crate) struct StreamStats {
 
 impl StreamStats {
     /// 按优先级给出最可能的结论。
+    ///
+    /// 这些结论是**用户直接看到**的排障信息（`require_content` 把它并进错误里），
+    /// 所以逐条走 t()/t_args()。判据本身（`finish_reason == "length"`、
+    /// `content_frames` 计数）是协议里的数据，不翻译。
     fn diagnosis(&self) -> Option<String> {
         let truncated = self.finish_reason.as_deref() == Some("length");
         match () {
-            _ if truncated && self.content_frames == 0 && self.reasoning_frames > 0 => Some(format!(
-                "模型把全部 token 用在推理通道，max_tokens={} 在输出正文前就用尽了；请调大 config.json 的 max_tokens（或 summary_max_tokens）",
-                self.max_tokens
-            )),
-            _ if truncated && self.content_frames > 0 => Some(format!(
-                "输出在 max_tokens={} 处被截断，内容可能不完整",
-                self.max_tokens
-            )),
-            _ if self.content_frames == 0 && self.reasoning_frames > 0 => Some(
-                "网关把内容放在 reasoning_content / reasoning 通道，模型只思考未作答；也可能是推理内容占满了输出预算"
-                    .to_string(),
-            ),
-            _ if self.error_frame.is_some() => Some("网关在流中返回了 error 对象".to_string()),
-            _ if self.parse_failures > 0 && self.content_frames == 0 => Some(
-                "所有帧都解析失败，网关返回的可能不是 SSE 格式".to_string(),
-            ),
-            _ if !self.saw_done && self.content_frames == 0 => {
-                Some("连接在 [DONE] 之前就断开了，响应可能被截断".to_string())
+            _ if truncated && self.content_frames == 0 && self.reasoning_frames > 0 => {
+                Some(t_args(
+                    "diagnosis_reasoning_truncated",
+                    &[("limit", self.max_tokens.into())],
+                ))
             }
+            _ if truncated && self.content_frames > 0 => Some(t_args(
+                "diagnosis_output_truncated",
+                &[("limit", self.max_tokens.into())],
+            )),
+            _ if self.content_frames == 0 && self.reasoning_frames > 0 => {
+                Some(t("diagnosis_reasoning_channel"))
+            }
+            _ if self.error_frame.is_some() => Some(t("diagnosis_error_frame")),
+            _ if self.parse_failures > 0 && self.content_frames == 0 => {
+                Some(t("diagnosis_parse_failed"))
+            }
+            _ if !self.saw_done && self.content_frames == 0 => Some(t("diagnosis_closed_early")),
             _ => None,
         }
     }
 
     /// 生成给人看的统计块，错误信息和 --debug 共用。
     pub fn report(&self) -> String {
+        // 键名一律翻译，**值**一律不翻：`finish_reason` 是网关给的协议字段
+        // （"length"/"stop"），`[DONE]` 是 SSE 的结束标记，两者都得原样留着，
+        // 否则用户拿这句去搜协议文档就搜不到了。只有「网关没给」时的占位词
+        // 和「收到没收到」是对人说的话。
+        let reason = self
+            .finish_reason
+            .clone()
+            .unwrap_or_else(|| t("not_provided"));
+        let done = if self.saw_done {
+            t("received")
+        } else {
+            t("not_received")
+        };
+
         let mut lines = vec![
-            format!("  端点: {}   模型: {}", self.endpoint, self.model),
-            format!(
-                "  请求: max_tokens={} temperature={}   HTTP {}",
-                self.max_tokens, self.temperature, self.status
+            t_args(
+                "report_endpoint",
+                &[
+                    ("endpoint", self.endpoint.clone().into()),
+                    ("model", self.model.clone().into()),
+                ],
             ),
-            format!(
-                "  帧: 共 {}（data {} / 其他 {}）  解析失败 {}",
-                self.data_frames + self.heartbeat_frames,
-                self.data_frames,
-                self.heartbeat_frames,
-                self.parse_failures
+            t_args(
+                "report_request",
+                &[
+                    ("max_tokens", self.max_tokens.into()),
+                    // 温度按字符串传，不传 f32：Fluent 内部把数值统一走 f64，
+                    // `0.7f32 as f64` 是 0.699999988079071，渲染出来就是
+                    // `temperature=0.699999988079071`——而 `format!("{}", 0.7f32)`
+                    // 是 `0.7`。默认配置正好是 0.7，所以每个用户都会看到它。
+                    ("temperature", self.temperature.to_string().into()),
+                    ("status", self.status.into()),
+                ],
             ),
-            format!(
-                "  含 content 的帧 {}（{} 字）   含推理内容的帧 {}（{} 字）",
-                self.content_frames,
-                self.content_chars,
-                self.reasoning_frames,
-                self.reasoning_chars
+            t_args(
+                "report_frames",
+                &[
+                    ("total", (self.data_frames + self.heartbeat_frames).into()),
+                    ("data", self.data_frames.into()),
+                    ("heartbeat", self.heartbeat_frames.into()),
+                    ("parse_failures", self.parse_failures.into()),
+                ],
             ),
-            format!(
-                "  finish_reason: {}   [DONE]: {}",
-                self.finish_reason.as_deref().unwrap_or("未提供"),
-                if self.saw_done {
-                    "已收到"
-                } else {
-                    "未收到"
-                }
+            t_args(
+                "report_content_frames",
+                &[
+                    ("content_frames", self.content_frames.into()),
+                    ("content_chars", self.content_chars.into()),
+                    ("reasoning_frames", self.reasoning_frames.into()),
+                    ("reasoning_chars", self.reasoning_chars.into()),
+                ],
+            ),
+            t_args(
+                "report_finish_reason",
+                &[("reason", reason.into()), ("done", done.into())],
             ),
         ];
 
         if let Some(error) = &self.error_frame {
-            lines.push(format!("  流内错误: {error}"));
+            lines.push(t_args(
+                "report_stream_error",
+                &[("error", error.clone().into())],
+            ));
         }
         if let Some(diagnosis) = self.diagnosis() {
-            lines.push(format!("  诊断: {diagnosis}"));
+            lines.push(t_args(
+                "report_diagnosis",
+                &[("diagnosis", diagnosis.into())],
+            ));
         }
         for (i, frame) in self.raw_tail.iter().enumerate() {
-            lines.push(format!("  原始片段 {}: {}", i + 1, frame));
+            lines.push(t_args(
+                "report_raw_frame",
+                &[("index", (i + 1).into()), ("frame", frame.clone().into())],
+            ));
         }
 
         lines.join("\n")
@@ -248,29 +288,35 @@ impl StreamedCompletion {
     /// 取出正文；为空则带上全部观测证据报错。
     ///
     /// `what` 说明这次调用是用来做什么的（例如「第 3/6 块摘要」）。
+    ///
+    /// `what` 本身由调用方给**已经本地化**的标签：分块摘要走 `t_args("chunk_summary")`，
+    /// 正文生成走 `t("what_commit_message")`。它会被插进下面两条消息里，
+    /// 所以必须和界面的语言一致——这就是 `chunk_summary` 要按 `t_args` 而不是字面量出现的原因。
     pub fn require_content(self, what: &str, secrets: &[&str]) -> Result<String> {
         if self.content.trim().is_empty() {
             let body = debug::redact_secrets(
-                &format!(
-                    "{}失败：模型没有返回任何内容\n{}",
-                    what,
-                    self.stats.report()
+                &t_args(
+                    "error_no_content",
+                    &[("what", what.into()), ("body", self.stats.report().into())],
                 ),
                 secrets,
             );
-            anyhow::bail!(
-                "{}\n  提示: 加 --debug 查看完整原始响应；或在 config.json 中调整 max_tokens",
-                body
-            );
+            // 两层键对应原字面量的两段：`error_no_content` 是「<做什么>失败：…」
+            // 加统计块，`no_content_error` 再把整段包进冒号后的提示行。脱敏夹在
+            // 两者中间——统计块里可能带出网关回显的密钥。
+            anyhow::bail!(t_args("no_content_error", &[("body", body.into())]));
         }
 
         // 截断但非空：以前会静默提交一条不完整的消息
         if self.stats.finish_reason.as_deref() == Some("length") {
             eprintln!(
                 "{}",
-                format!(
-                    "⚠️  {}的模型输出在 max_tokens={} 处被截断，内容可能不完整",
-                    what, self.stats.max_tokens
+                t_args(
+                    "truncated_output_warning",
+                    &[
+                        ("what", what.into()),
+                        ("limit", self.stats.max_tokens.into())
+                    ]
                 )
                 .yellow()
             );
@@ -335,7 +381,7 @@ where
         // 只作兜底：网关挂起时不让工具永远卡死。放得足够宽，避免误杀长时间生成。
         .timeout(Duration::from_secs(600))
         .build()
-        .context("构建 HTTP 客户端失败")?;
+        .context(t("http_client_error"))?;
 
     let request = LlmRequest {
         model: config.model.to_string(),
@@ -352,7 +398,7 @@ where
         .json(&request)
         .send()
         .await
-        .context("调用 大模型 API 失败")?;
+        .context(t("api_call_failed"))?;
 
     stats.status = response.status().as_u16();
     stats.content_type = response
@@ -384,7 +430,11 @@ where
             &debug::truncate(&body, debug::MAX_ERROR_BODY_CHARS),
             &[&config.api_token],
         );
-        anyhow::bail!("API 请求失败 (HTTP {}): {}", stats.status, body);
+        // HTTP 状态码和响应体都是**数据**，只有外面的那句说明翻译。
+        anyhow::bail!(t_args(
+            "api_request_failed",
+            &[("status", stats.status.into()), ("body", body.into())]
+        ));
     }
 
     use futures_util::StreamExt;
@@ -399,7 +449,7 @@ where
         if !stream_done {
             match stream.next().await {
                 Some(chunk_result) => {
-                    pending.extend_from_slice(&chunk_result.context("读取响应流失败")?);
+                    pending.extend_from_slice(&chunk_result.context(t("stream_read_failed"))?);
                 }
                 None => {
                     stream_done = true;
@@ -527,7 +577,7 @@ where
 
     let model_config = config
         .active_model()
-        .context("No active model configured. Please run with --model or set it in config.json")?;
+        .context(t("no_active_model_context"))?;
     // 语言是 `Option`：`Config::load()` 一定会补上，退回缺省值只是防御，
     // 避免 prompt 里出现空语言名。
     let language = config.language.as_deref().unwrap_or("zh-CN");
@@ -593,7 +643,7 @@ where
         callback,
     )
     .await?
-    .require_content("生成 commit 消息", &[&model_config.api_token])
+    .require_content(&t("what_commit_message"), &[&model_config.api_token])
 }
 
 /// 长 diff 的最终生成入口。
@@ -620,7 +670,7 @@ where
         callback,
     )
     .await?
-    .require_content("生成 commit 消息", &[&config.api_token])
+    .require_content(&t("what_commit_message"), &[&config.api_token])
 }
 
 /// 生成摘要
@@ -847,6 +897,9 @@ mod tests {
     /// 而这条回复会被当成 commit 消息拿去提交。
     #[tokio::test]
     async fn generate_summary_errors_when_stream_has_no_content() {
+        // 下面断言的是中文原文，先把进程 locale 钉到 zh-CN（R7）
+        crate::i18n::pin_test_locale();
+
         let pieces = vec![
             sse(r#"{"choices":[{"delta":{"role":"assistant"}}]}"#),
             sse("[DONE]"),
@@ -862,6 +915,9 @@ mod tests {
     /// 而不是给一句无从下手的「没有返回任何内容」。
     #[tokio::test]
     async fn diagnosis_identifies_reasoning_truncation() {
+        // 断言「推理通道」是中文原文，钉住 zh-CN（R7）
+        crate::i18n::pin_test_locale();
+
         let pieces = vec![
             sse(
                 r#"{"choices":[{"delta":{"role":"assistant","reasoning_content":"用户想要我总结这段 diff"}}]}"#,
@@ -883,6 +939,9 @@ mod tests {
     /// 完全空的流：错误信息里要有帧统计和原始片段
     #[tokio::test]
     async fn diagnosis_reports_frame_statistics() {
+        // 断言的是 report() 的中文行（端点:/帧:/原始片段），钉住 zh-CN（R7）
+        crate::i18n::pin_test_locale();
+
         let pieces = vec![
             sse(r#"{"choices":[]}"#),
             sse(r#"{"choices":[]}"#),
@@ -894,6 +953,52 @@ mod tests {
         assert!(err.contains("端点:"), "{err}");
         assert!(err.contains("帧: 共 3"), "{err}");
         assert!(err.contains("原始片段"), "{err}");
+    }
+
+    /// `report()` 渲染出来的每一行，都必须和改造前的字面量逐字节相同。
+    ///
+    /// 这一条**不是** `i18n.rs` 那条空白守卫的重复：那条钉的是 `locales/*.ftl` 里的
+    /// 值，管不到**插值**。温度就是从这里漏过去的——Fluent 内部把数值统一走 f64，
+    /// `0.7f32` 渲染成 `0.699999988079071`，而 `format!("{}", 0.7f32)` 是 `0.7`；
+    /// 默认配置正好是 0.7，于是每个用户都会在诊断块里看到这串数字。所以这里连
+    /// 插值之后的整行一起钉住，而不是只钉 `$temperature` 这个占位符。
+    #[test]
+    fn report_renders_byte_identical_to_the_original_literals() {
+        crate::i18n::pin_test_locale();
+
+        let stats = StreamStats {
+            endpoint: "http://127.0.0.1:1/v1/chat/completions".to_string(),
+            model: "test-model".to_string(),
+            max_tokens: 64,
+            temperature: 0.7,
+            status: 200,
+            content_type: Some("text/event-stream".to_string()),
+            data_frames: 2,
+            heartbeat_frames: 1,
+            parse_failures: 0,
+            content_frames: 1,
+            content_chars: 4,
+            reasoning_frames: 2,
+            reasoning_chars: 9,
+            finish_reason: Some("length".to_string()),
+            saw_done: true,
+            error_frame: Some(r#"{"message":"model overloaded"}"#.to_string()),
+            elapsed_ms: 12,
+            raw_tail: vec![r#"{"choices":[]}"#.to_string()],
+        };
+
+        let expected = concat!(
+            "  端点: http://127.0.0.1:1/v1/chat/completions   模型: test-model\n",
+            "  请求: max_tokens=64 temperature=0.7   HTTP 200\n",
+            "  帧: 共 3（data 2 / 其他 1）  解析失败 0\n",
+            "  含 content 的帧 1（4 字）   含推理内容的帧 2（9 字）\n",
+            "  finish_reason: length   [DONE]: 已收到\n",
+            "  流内错误: {\"message\":\"model overloaded\"}\n",
+            "  诊断: 输出在 max_tokens=64 处被截断，内容可能不完整\n",
+            "  原始片段 1: {\"choices\":[]}",
+        );
+
+        assert_eq!(stats.report(), expected);
     }
 
     /// 推理内容**绝不能**被当成正文拼进去
@@ -983,6 +1088,9 @@ mod tests {
     /// 密钥不能出现在错误信息里（网关可能把 Authorization 回显进响应）
     #[tokio::test]
     async fn error_message_redacts_api_token() {
+        // 断言的是 report() 的中文行（端点:），钉住 zh-CN（R7）
+        crate::i18n::pin_test_locale();
+
         let pieces = vec![sse(r#"{"choices":[]}"#), sse("[DONE]")];
 
         let completion = run(pieces).await;
