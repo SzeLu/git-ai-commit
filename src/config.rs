@@ -110,29 +110,46 @@ impl Default for Config {
 }
 
 impl Config {
-    /// 读取配置文件；文件不存在或无法解析时返回 `None`。
+    /// 读取配置文件。
+    ///
+    /// 文件不存在、读不出、或解析不了时，都返回一份**默认配置**（`Some`）：
+    /// 这三种情况对用户来说都是「没提供语言」，语言一律填系统 locale
+    /// （spec §4 的第 2 优先级），而不是退回硬编码的 zh-CN——那样会让损坏的
+    /// 配置静默跳过系统语言检测，和「文件不存在」走得不一样。只有连配置路径都
+    /// 定不下来（拿不到 home 目录）才返回 `None`，交给调用方兜底。
     ///
     /// 这里不再顺手写回一份默认配置：空的默认配置没有任何可用模型，
     /// 写出去既没意义，又会把“还没初始化”这个状态掩盖成“已配置”。
     /// 首次运行由调用方交互式补齐后再 `save`。
     pub fn load() -> Option<Self> {
         let config_path = Self::get_config_path().ok()?;
-        // 语言缺省时补系统 locale（spec §4 的第 2 优先级）。`sys_locale::get_locale`
-        // 返回 `Option` 而不是 `Result`，拿不到才退回 en-US。
-        if !config_path.exists() {
-            let mut config = Config::default();
-            if let Some(locale) = sys_locale::get_locale() {
-                config.language = Some(locale);
+
+        // 文件不存在 / 读不出 / 解析不了，三者一视同仁：都没有用户提供的语言，
+        // 统一退回默认配置，并把语言填成系统 locale（spec §4 的第 2 优先级）。
+        // `sys_locale::get_locale` 返回 `Option`，拿不到才保留默认的 zh-CN。
+        let parsed: Option<Config> = std::fs::read_to_string(&config_path)
+            .ok()
+            .and_then(|content| serde_json::from_str(&content).ok());
+
+        let config = match parsed {
+            Some(mut config) => {
+                // 解析成功但没写 language：同样视为「没提供」，补系统 locale，
+                // 拿不到才退回 en-US。
+                if config.language.is_none() {
+                    config.language =
+                        Some(sys_locale::get_locale().unwrap_or_else(|| "en-US".to_string()));
+                }
+                config
             }
-            return Some(config);
-        }
+            None => {
+                let mut config = Config::default();
+                if let Some(locale) = sys_locale::get_locale() {
+                    config.language = Some(locale);
+                }
+                config
+            }
+        };
 
-        let content = std::fs::read_to_string(config_path).ok()?;
-        let mut config: Config = serde_json::from_str(&content).ok()?;
-
-        if config.language.is_none() {
-            config.language = Some(sys_locale::get_locale().unwrap_or_else(|| "en-US".to_string()));
-        }
         Some(config)
     }
 
@@ -177,12 +194,14 @@ impl Config {
     }
 
     fn get_config_path() -> Result<PathBuf> {
-        // 这里用 `with_context`（惰性）而不是 `context`（立即求值）：本函数是
-        // `Config::load()` 的一部分，而 `main()` 必须先从配置里读到 `language`
-        // 才能调用 `i18n::install()`——也就是说**语言就绪之前**这条语句已经跑过了。
-        // 立即求值会在这段窗口里把 `t()` 的结果钉成 key 本身，最后用户看到
-        // `home_dir_error` 而不是「无法获取 home 目录」。推迟到真出错的那一刻
-        // 才取文案，语言必然已经装好。
+        // 这里用 `with_context`（惰性闭包）而不是 `context`（立即求值）只是风格：
+        // 两者都只在出错时给错误挂一句文案，谁也不会「冻结」什么——`context(x)` 的
+        // x 在调用点求值一次，`with_context(|| x)` 的闭包拖到出错那一刻才求值，
+        // 差别只在求值时机，不在结果。而且「语言装好之前这条语句已经跑过」这件事
+        // 在这条路径上无关紧要：`Config::load()` 用 `.ok()?` 把这里的错误整个丢掉，
+        // `main()` 再对返回的 `None` 走 `.unwrap_or_default()`——`home_dir_error`
+        // 这句文案根本到不了用户眼前。真正把它递给用户的是 `save()`（错误经 `?`
+        // 往上抛），但 `save()` 发生在 `i18n::install()` 之后，语言早已装好。
         let home = dirs::home_dir().with_context(|| t("home_dir_error"))?;
         Ok(home.join(".git-ai-commit").join("config.json"))
     }

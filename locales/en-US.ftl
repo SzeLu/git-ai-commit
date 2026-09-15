@@ -2,7 +2,9 @@
 #
 # Every key of zh-CN.ftl must exist here too: a user of any other locale
 # falls through to this file, and a missing key shows up as the raw key
-# name. Keep the two files' key sets identical.
+# name. Keep the two files' key sets identical — with one deliberate
+# exception: `hello` (below) is en-US-only and zh-CN.ftl does not carry it,
+# so do not "fix" that asymmetry.
 #
 # A value starting with {"..."} carries the leading spaces of the original
 # prompt line, and a trailing {" "} is the original trailing space. Fluent
