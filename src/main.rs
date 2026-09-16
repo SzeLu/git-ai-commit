@@ -114,13 +114,38 @@ async fn main() -> Result<()> {
 
     // 打印当前实际生效的大模型
     // （`selected_model` 可能已失效而回退到兼容字段 `model`，所以要显示解析结果）
-    let model_config = config.active_model().context(t("no_active_model_error"))?;
+    let mut model_config = config.active_model().context(t("no_active_model_error"))?.clone();
+    let model_name_red = model_config.model.red().to_string();
+
+    // 检查模型可用性
+    if !ai::check_availability(&model_config).await? {
+        if config.models.len() > 1 {
+            println!("{}", t("select_model_prompt"));
+            let model_name = prompt_input(&t("model_selection_prompt"));
+            if model_name.trim().is_empty() || !config.models.contains_key(&model_name) {
+                eprintln!("{}", t("invalid_selection"));
+                std::process::exit(1);
+            }
+            config.selected_model = model_name;
+            if let Err(e) = config.save() {
+                eprintln!(
+                    "{}",
+                    t_args("save_config_error", &[("error", e.to_string().into())])
+                );
+            }
+            model_config = config.active_model().context(t("no_active_model_error"))?.clone();
+        } else {
+            eprintln!("{}", t("model_unavailable"));
+            std::process::exit(1);
+        }
+    }
+
     // 红色只加在模型名上，所以先着色再作为变量传进去，整行不能着色
     println!(
         "{}",
         t_args(
             "current_model_label",
-            &[("model", model_config.model.red().to_string().into())]
+            &[("model", model_name_red.clone().into())]
         )
     );
 
@@ -153,7 +178,7 @@ async fn main() -> Result<()> {
     println!("{}", t("generating_message").blue());
     let generated = generate_message(
         &config,
-        model_config,
+        &model_config,
         &diff,
         &status,
         &diff_stats,
@@ -372,7 +397,7 @@ async fn generate_message(
 
     println!("{}", t("final_message").blue());
     match ai::generate_commit_message_custom_prompt(
-        model_config,
+        &model_config,
         language,
         &custom_prompt,
         config.final_params(),

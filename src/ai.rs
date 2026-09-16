@@ -326,14 +326,68 @@ impl StreamedCompletion {
     }
 }
 
-/// 拼出 chat completions 端点，兼容用户填 `base_url` 的几种写法。
+/// Checks if the model is responsive by sending a minimal request.
+pub async fn check_availability(
+    config: &config::ModelConfig,
+) -> Result<bool> {
+    if config.model.is_empty() {
+        return Ok(false);
+    }
+    let _stats = StreamStats {
+        endpoint: chat_endpoint(&config.base_url),
+        model: config.model.clone(),
+        max_tokens: 10,
+        temperature: 0.7,
+        ..Default::default()
+    };
+
+    let messages = vec![Message::user("hi".to_string())];
+    let params = GenParams {
+        max_tokens: 10,
+        temperature: 0.7,
+    };
+
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(10))
+        .build()
+        .context(t("http_client_error"))?;
+
+    let request = LlmRequest {
+        model: config.model.clone(),
+        messages,
+        temperature: params.temperature,
+        max_tokens: params.max_tokens,
+        stream: Some(false),
+    };
+
+    let response = client
+        .post(&chat_endpoint(&config.base_url))
+        .header("Authorization", format!("Bearer {}", config.api_token))
+        .header("Content-Type", "application/json")
+        .json(&request)
+        .send()
+        .await;
+
+    match response {
+        Ok(res) if res.status().is_success() => {
+            let body: Result<LlmResponse> = res.json().await;
+            match body {
+                Ok(resp) if resp.error.is_none() && !resp.choices.is_empty() => Ok(true),
+                _ => Ok(false),
+            }
+        }
+        _ => Ok(false),
+    }
+}
+
 fn chat_endpoint(base_url: &str) -> String {
     if base_url.ends_with("/chat/completions") {
         base_url.to_string()
     } else if base_url.ends_with('/') {
         format!("{}chat/completions", base_url)
     } else {
-        format!("{}/chat/completions", base_url)
+        format!("{}/chat_completions", base_url)
     }
 }
 

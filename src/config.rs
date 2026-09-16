@@ -76,7 +76,7 @@ fn default_chunk_threshold() -> usize {
     8000
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ModelConfig {
     pub model: String,
     pub base_url: String,
