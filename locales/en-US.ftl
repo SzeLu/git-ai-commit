@@ -114,3 +114,7 @@ api_request_failed = API request failed (HTTP { $status }): { $body }
 stream_read_failed = Failed to read the response stream
 no_active_model_context = No active model configured. Please run with --model or set it in config.json
 what_commit_message = Commit message generation
+model_unavailable = ❌ The selected model is unavailable, please check your network or API configuration.
+select_model_prompt = ⚠ The current model is unavailable. Please select another available model.
+model_selection_prompt = Enter the model name to switch to (e.g., deepseek-chat):
+invalid_selection = ❌ The entered model name is invalid or does not match, please try again.

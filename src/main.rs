@@ -15,6 +15,7 @@ use colored::*;
 use std::io::{self, Write};
 
 use crate::i18n::{t, t_args};
+use inquire::Select;
 
 fn prompt_input(prompt: &str) -> String {
     print!("{} ", prompt);
@@ -119,13 +120,15 @@ async fn main() -> Result<()> {
     // 检查模型可用性
     if config.selected_model.is_empty() || !ai::check_availability(&model_config).await? {
         if config.models.len() > 1 {
-            println!("{}", t("select_model_prompt"));
-            let model_name = prompt_input(&t("model_selection_prompt"));
-            if model_name.trim().is_empty() || !config.models.contains_key(&model_name) {
-                eprintln!("{}", t("invalid_selection"));
-                std::process::exit(1);
-            }
-            config.selected_model = model_name;
+            let options: Vec<&String> = config.models.keys().collect();
+            let model_name = match Select::new(&t("model_selection_prompt"), options).prompt() {
+                Ok(name) => name,
+                Err(_) => {
+                    eprintln!("{}", t("invalid_selection"));
+                    std::process::exit(1);
+                }
+            };
+            config.selected_model = model_name.clone();
             if let Err(e) = config.save() {
                 eprintln!(
                     "{}",

@@ -388,7 +388,7 @@ fn chat_endpoint(base_url: &str) -> String {
     } else if base_url.ends_with('/') {
         format!("{}chat/completions", base_url)
     } else {
-        format!("{}/chat_completions", base_url)
+        format!("{}/chat/completions", base_url)
     }
 }
 
@@ -1171,6 +1171,25 @@ mod tests {
 
         assert_eq!(completion.content, "partial-tail");
         assert!(!completion.stats.saw_done);
+    }
+
+    /// 回归测试：`base_url` 不以斜杠结尾时（如 `http://host:8000/v1`），
+    /// 拼接出的路径必须是 `/chat/completions`。
+    /// 曾经写成 `/chat_completions`（下划线），导致所有这类配置都 404。
+    #[test]
+    fn chat_endpoint_uses_slash_not_underscore() {
+        assert_eq!(
+            chat_endpoint("http://host:8000/v1"),
+            "http://host:8000/v1/chat/completions"
+        );
+        assert_eq!(
+            chat_endpoint("http://host:8000/v1/"),
+            "http://host:8000/v1/chat/completions"
+        );
+        assert_eq!(
+            chat_endpoint("http://host:8000/v1/chat/completions"),
+            "http://host:8000/v1/chat/completions"
+        );
     }
 
     /// system prompt 必须带上配置的语言，否则模型会跟着固定的中文模板走。
