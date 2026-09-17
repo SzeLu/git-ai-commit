@@ -10,9 +10,6 @@ pub struct Config {
     /// 默认语言（用于 Prompt 模板）
     #[serde(default)]
     pub language: Option<String>,
-    /// 默认使用的模型名称（兼容旧配置）
-    #[serde(default = "default_model")]
-    pub model: String,
     /// 允许配置多个大模型的列表（按优先级顺序）
     #[serde(default = "default_models")]
     pub models: HashMap<String, ModelConfig>,
@@ -50,10 +47,6 @@ pub struct GenParams {
 
 fn default_language() -> Option<String> {
     Some("zh-CN".to_string())
-}
-
-fn default_model() -> String {
-    "".to_string()
 }
 
 fn default_max_tokens() -> u32 {
@@ -94,7 +87,6 @@ fn default_selected_model() -> String {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            model: "".to_string(),
             language: default_language(),
             models: HashMap::new(),
             selected_model: "".to_string(),
@@ -158,7 +150,7 @@ impl Config {
     /// 依次尝试 `selected_model` 和兼容旧配置的 `model` 字段；
     /// 都取不到时返回 `None`，表示调用方需要交互式初始化。
     pub fn active_model(&self) -> Option<&ModelConfig> {
-        [self.selected_model.as_str(), self.model.as_str()]
+        [self.selected_model.as_str()]
             .into_iter()
             .filter(|name| !name.is_empty())
             .find_map(|name| self.models.get(name))
@@ -210,44 +202,6 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn config_with(selected: &str, legacy: &str, names: &[&str]) -> Config {
-        let mut config = Config::default();
-        for name in names {
-            config.models.insert(
-                (*name).to_string(),
-                ModelConfig {
-                    model: (*name).to_string(),
-                    base_url: "http://localhost/v1".to_string(),
-                    api_token: "token".to_string(),
-                },
-            );
-        }
-        config.selected_model = selected.to_string();
-        config.model = legacy.to_string();
-        config
-    }
-
-    #[test]
-    fn active_model_prefers_selected_model() {
-        let config = config_with("b", "a", &["a", "b"]);
-        assert_eq!(config.active_model().unwrap().model, "b");
-    }
-
-    /// 旧配置只填了 `model` 字段时，应回退到它而不是判定为“未配置”。
-    #[test]
-    fn active_model_falls_back_to_legacy_field() {
-        let config = config_with("", "a", &["a"]);
-        assert_eq!(config.active_model().unwrap().model, "a");
-    }
-
-    #[test]
-    fn active_model_is_none_when_unusable() {
-        // 空配置（首次运行）
-        assert!(Config::default().active_model().is_none());
-        // selected_model 指向一个不存在的条目
-        assert!(config_with("missing", "", &["a"]).active_model().is_none());
-    }
 
     /// 用 serde_json 直接解析，而不是 `Config::load()`——后者读 `$HOME`，
     /// 在并行单测里是进程级竞态。

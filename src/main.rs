@@ -100,8 +100,7 @@ async fn main() -> Result<()> {
                 api_token,
             },
         );
-        // 兼容旧配置里的单模型字段
-        config.model = model.clone();
+
         config.selected_model = model;
 
         if let Err(e) = config.save() {
@@ -118,7 +117,7 @@ async fn main() -> Result<()> {
     let model_name_red = model_config.model.red().to_string();
 
     // 检查模型可用性
-    if !ai::check_availability(&model_config).await? {
+    if config.selected_model.is_empty() || !ai::check_availability(&model_config).await? {
         if config.models.len() > 1 {
             println!("{}", t("select_model_prompt"));
             let model_name = prompt_input(&t("model_selection_prompt"));

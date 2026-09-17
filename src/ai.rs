@@ -371,10 +371,11 @@ pub async fn check_availability(
 
     match response {
         Ok(res) if res.status().is_success() => {
-            let body: Result<LlmResponse> = res.json().await;
-            match body {
-                Ok(resp) if resp.error.is_none() && !resp.choices.is_empty() => Ok(true),
-                _ => Ok(false),
+            let body: LlmResponse = res.json().await?;
+            if body.error.is_none() && !body.choices.is_empty() {
+                Ok(true)
+            } else {
+                Ok(false)
             }
         }
         _ => Ok(false),
