@@ -327,9 +327,7 @@ impl StreamedCompletion {
 }
 
 /// Checks if the model is responsive by sending a minimal request.
-pub async fn check_availability(
-    config: &config::ModelConfig,
-) -> Result<bool> {
+pub async fn check_availability(config: &config::ModelConfig) -> Result<bool> {
     if config.model.is_empty() {
         return Ok(false);
     }

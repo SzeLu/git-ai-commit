@@ -25,6 +25,18 @@ fn prompt_input(prompt: &str) -> String {
     input.trim().to_string()
 }
 
+/// 把 `selected_model` 切到 `name`，返回切换后实际生效的模型配置。
+///
+/// 返回值是展示与请求的唯一依据：显示标签若沿用切换前的旧配置，
+/// 就会出现「选了 A 却显示 B」。保存配置由调用方负责，本函数不落盘。
+fn switch_selected_model(config: &mut config::Config, name: &str) -> Result<config::ModelConfig> {
+    config.selected_model = name.to_string();
+    config
+        .active_model()
+        .cloned()
+        .context(t("no_active_model_error"))
+}
+
 /// CLI 入口
 #[derive(Parser)]
 #[command(name = "git-ai-commit")]
@@ -112,43 +124,43 @@ async fn main() -> Result<()> {
         }
     }
 
-    // 打印当前实际生效的大模型
-    // （`selected_model` 可能已失效而回退到兼容字段 `model`，所以要显示解析结果）
-    let mut model_config = config.active_model().context(t("no_active_model_error"))?.clone();
-    let model_name_red = model_config.model.red().to_string();
+    // 当前生效的模型配置（`selected_model` 可能已失效而回退到兼容字段 `model`）。
+    // 切换模型后会被重新解析，展示与请求都以此为准。
+    let mut model_config = config
+        .active_model()
+        .context(t("no_active_model_error"))?
+        .clone();
 
     // 检查模型可用性
     if config.selected_model.is_empty() || !ai::check_availability(&model_config).await? {
         if config.models.len() > 1 {
             let options: Vec<&String> = config.models.keys().collect();
             let model_name = match Select::new(&t("model_selection_prompt"), options).prompt() {
-                Ok(name) => name,
+                Ok(name) => name.clone(),
                 Err(_) => {
                     eprintln!("{}", t("invalid_selection"));
                     std::process::exit(1);
                 }
             };
-            config.selected_model = model_name.clone();
+            model_config = switch_selected_model(&mut config, &model_name)?;
             if let Err(e) = config.save() {
                 eprintln!(
                     "{}",
                     t_args("save_config_error", &[("error", e.to_string().into())])
                 );
             }
-            model_config = config.active_model().context(t("no_active_model_error"))?.clone();
         } else {
             eprintln!("{}", t("model_unavailable"));
             std::process::exit(1);
         }
     }
 
-    // 红色只加在模型名上，所以先着色再作为变量传进去，整行不能着色
+    // 红色只加在模型名上，所以先着色再作为变量传进去，整行不能着色。
+    // 必须在模型切换**之后**取值，否则会显示切换前的旧模型。
+    let model_name_red = model_config.model.red().to_string();
     println!(
         "{}",
-        t_args(
-            "current_model_label",
-            &[("model", model_name_red.clone().into())]
-        )
+        t_args("current_model_label", &[("model", model_name_red.into())])
     );
 
     // 检查是否在 Git 仓库中
@@ -493,6 +505,37 @@ fn print_delta(text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 回归测试：切换模型后必须解析出**新**模型的配置。
+    ///
+    /// 界面上「当前使用的大模型」曾经在可用性检查**之前**就取好了值，
+    /// 用户切换模型后标签仍指向旧模型（选 gemma-omlx 却显示 gemma-26b）。
+    #[test]
+    fn switching_selected_model_resolves_the_new_model() {
+        let mut config = config::Config::default();
+        config.models.insert(
+            "gemma-26b".to_string(),
+            config::ModelConfig {
+                model: "google/gemma-4-26b-a4b-qat".to_string(),
+                base_url: "http://x/v1".to_string(),
+                api_token: "t".to_string(),
+            },
+        );
+        config.models.insert(
+            "gemma-omlx".to_string(),
+            config::ModelConfig {
+                model: "gemma-4-26b-a4b-it-4bit".to_string(),
+                base_url: "http://y/v1".to_string(),
+                api_token: "t".to_string(),
+            },
+        );
+        config.selected_model = "gemma-26b".to_string();
+
+        let resolved = switch_selected_model(&mut config, "gemma-omlx").unwrap();
+
+        assert_eq!(resolved.model, "gemma-4-26b-a4b-it-4bit");
+        assert_eq!(config.selected_model, "gemma-omlx");
+    }
 
     #[test]
     fn dry_run_never_auto_commits() {
