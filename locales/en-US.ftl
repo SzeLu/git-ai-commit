@@ -16,7 +16,7 @@ hello = Hello, { $name }!
 
 # main.rs — startup, config, progress and pre-commit prompts
 config_model_required = ❌ No usable model in the config; please enter the model details manually
-model_input_prompt = Enter the model name (e.g., deepseek-chat):
+model_input_prompt = Enter the model name:
 model_name_validation = ❌ Model name cannot be empty. Aborting.
 base_url_input_prompt = Enter the model API URL:
 base_url_validation = ❌ Model API URL cannot be empty. Aborting.
@@ -116,5 +116,5 @@ no_active_model_context = No active model configured. Please run with --model or
 what_commit_message = Commit message generation
 model_unavailable = ❌ The selected model is unavailable, please check your network or API configuration.
 select_model_prompt = ⚠ The current model is unavailable. Please select another available model.
-model_selection_prompt = Enter the model name to switch to (e.g., deepseek-chat):
+model_selection_prompt = Enter the model name to switch to:
 invalid_selection = ❌ The entered model name is invalid or does not match, please try again.

@@ -997,7 +997,7 @@ mod tests {
         // 钉的依旧是原字面量本身：原字面量的结尾没有空格。
         assert_eq!(
             manager.get_message("model_input_prompt", None),
-            "请输入模型名称 (e.g., deepseek-chat):"
+            "请输入模型名称:"
         );
         assert_eq!(
             manager.get_message("base_url_input_prompt", None),
