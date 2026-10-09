@@ -9,7 +9,7 @@
 
 # main.rs —— 启动、配置、进度与提交前的提示
 config_model_required = ❌ 配置中没有可用的模型，需手动输入模型信息
-model_input_prompt = 请选择模型名称:
+model_input_prompt = 请输入模型名称:
 model_name_validation = ❌ 模型名称不能为空。终止操作。
 base_url_input_prompt = 请输入模型 API URL:
 base_url_validation = ❌ 模型 API URL 不能为空。终止操作。
@@ -107,6 +107,5 @@ stream_read_failed = 读取响应流失败
 no_active_model_context = No active model configured. Please run with --model or set it in config.json
 what_commit_message = 生成 commit 消息
 model_unavailable = ❌ 选定的模型不可用，请检查网络或 API 配置。
-select_model_prompt = ⚠ 当前模型不可用。请选择另一个可用模型。
 model_selection_prompt = 请输入要切换的模型名称:
 invalid_selection = ❌ 输入的模型名称无效或不匹配，请重试。

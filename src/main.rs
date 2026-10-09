@@ -161,15 +161,14 @@ async fn main() -> Result<()> {
         }
     }
 
-    // 当前生效的模型配置（`selected_model` 可能已失效而回退到兼容字段 `model`）。
-    // 切换模型后会被重新解析，展示与请求都以此为准。
+    // 当前生效的模型配置。切换模型后会被重新解析，展示与请求都以此为准。
     let mut model_config = config
         .active_model()
         .context(t("no_active_model_error"))?
         .clone();
 
-    // 检查模型可用性
-    if config.selected_model.is_empty() || !ai::check_availability(&model_config).await? {
+    // 检查模型可用性（走到这里 `active_model()` 已保证 `Some`，`selected_model` 必非空且命中）
+    if !ai::check_availability(&model_config).await? {
         if config.models.len() > 1 {
             model_config = prompt_select_model(&mut config)?;
         } else {

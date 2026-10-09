@@ -145,15 +145,14 @@ impl Config {
         Some(config)
     }
 
-    /// 当前生效的模型配置。
+    /// 当前生效的模型配置：`selected_model` 命中的 `models` 条目。
     ///
-    /// 依次尝试 `selected_model` 和兼容旧配置的 `model` 字段；
-    /// 都取不到时返回 `None`，表示调用方需要交互式初始化。
+    /// `selected_model` 为空或未命中时返回 `None`，表示调用方需要交互式补齐。
     pub fn active_model(&self) -> Option<&ModelConfig> {
-        [self.selected_model.as_str()]
-            .into_iter()
-            .filter(|name| !name.is_empty())
-            .find_map(|name| self.models.get(name))
+        if self.selected_model.is_empty() {
+            return None;
+        }
+        self.models.get(&self.selected_model)
     }
 
     /// 摘要请求的参数。
