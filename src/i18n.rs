@@ -833,6 +833,13 @@ mod tests {
             ),
             "⚠️  最终生成失败，改用本地兜底消息：连接超时"
         );
+        assert_eq!(
+            manager.get_message(
+                "selected_model_mismatch",
+                Some(&args(&[("name", "m".into())]))
+            ),
+            "⚠️  配置中的 selected_model \"m\" 不在 models 列表中，请选择要使用的模型"
+        );
 
         // ── ai.rs 接进来之后补上的那一批 ────────────────────────────────────
         // `report()` 的每一行都以两个空格缩进，两条诊断/提示行也是。这些键以前是
@@ -1232,6 +1239,7 @@ mod tests {
         "report_raw_frame",
         "report_request",
         "report_stream_error",
+        "selected_model_mismatch",
         "strict_format_blocked_hint",
         "truncated_output_warning",
         "use_all_flag_hint",

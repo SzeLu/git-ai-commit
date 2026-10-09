@@ -37,6 +37,29 @@ fn switch_selected_model(config: &mut config::Config, name: &str) -> Result<conf
         .context(t("no_active_model_error"))
 }
 
+/// 弹出模型选择器，把 `selected_model` 切到用户选中的条目并落盘，
+/// 返回切换后实际生效的模型配置。
+fn prompt_select_model(config: &mut config::Config) -> Result<config::ModelConfig> {
+    // HashMap 的键序随机，排序让选择器每次的呈现一致
+    let mut options: Vec<&String> = config.models.keys().collect();
+    options.sort();
+    let model_name = match Select::new(&t("model_selection_prompt"), options).prompt() {
+        Ok(name) => name.clone(),
+        Err(_) => {
+            eprintln!("{}", t("invalid_selection"));
+            std::process::exit(1);
+        }
+    };
+    let resolved = switch_selected_model(config, &model_name)?;
+    if let Err(e) = config.save() {
+        eprintln!(
+            "{}",
+            t_args("save_config_error", &[("error", e.to_string().into())])
+        );
+    }
+    Ok(resolved)
+}
+
 /// CLI 入口
 #[derive(Parser)]
 #[command(name = "git-ai-commit")]
@@ -81,46 +104,60 @@ async fn main() -> Result<()> {
     // 走系统 locale（spec §4 的优先级链）。
     i18n::install(config.language.clone());
 
-    // 没有可用模型（首次运行、配置损坏、或 selected_model 指向已删除的条目）时
-    // 交互式补齐。这里往已读到的配置里合并，而不是新建一份，避免把配置文件里
+    // 没有可用模型时交互式补齐，分两种情况：
+    // - models 为空（首次运行、配置损坏）：手动录入一个新模型；
+    // - models 非空但 selected_model 未命中（指向已删除/改名的条目）：
+    //   直接从已有列表里选即可，不必重录 base_url / api_token。
+    // 这里往已读到的配置里合并，而不是新建一份，避免把配置文件里
     // 其它模型一起冲掉。
     if config.active_model().is_none() {
-        println!("{}", t("config_model_required"));
-        let model = prompt_input(&t("model_input_prompt"));
-        // Validate input: model, base_url, and api_token must not be empty
-        if model.trim().is_empty() {
-            eprintln!("{}", t("model_name_validation"));
-            std::process::exit(1);
-        }
-        let base_url = prompt_input(&t("base_url_input_prompt"));
-        // Validate input: base_url must not be empty
-        if base_url.trim().is_empty() {
-            eprintln!("{}", t("base_url_validation"));
-            std::process::exit(1);
-        }
-        let api_token = prompt_input(&t("api_token_input_prompt"));
-        // Validate input: api_token must not be empty
-        if api_token.trim().is_empty() {
-            eprintln!("{}", t("api_token_validation"));
-            std::process::exit(1);
-        }
+        if config.models.is_empty() {
+            println!("{}", t("config_model_required"));
+            let model = prompt_input(&t("model_input_prompt"));
+            // Validate input: model, base_url, and api_token must not be empty
+            if model.trim().is_empty() {
+                eprintln!("{}", t("model_name_validation"));
+                std::process::exit(1);
+            }
+            let base_url = prompt_input(&t("base_url_input_prompt"));
+            // Validate input: base_url must not be empty
+            if base_url.trim().is_empty() {
+                eprintln!("{}", t("base_url_validation"));
+                std::process::exit(1);
+            }
+            let api_token = prompt_input(&t("api_token_input_prompt"));
+            // Validate input: api_token must not be empty
+            if api_token.trim().is_empty() {
+                eprintln!("{}", t("api_token_validation"));
+                std::process::exit(1);
+            }
 
-        config.models.insert(
-            model.clone(),
-            config::ModelConfig {
-                model: model.clone(),
-                base_url,
-                api_token,
-            },
-        );
-
-        config.selected_model = model;
-
-        if let Err(e) = config.save() {
-            eprintln!(
-                "{}",
-                t_args("save_config_error", &[("error", e.to_string().into())])
+            config.models.insert(
+                model.clone(),
+                config::ModelConfig {
+                    model: model.clone(),
+                    base_url,
+                    api_token,
+                },
             );
+
+            config.selected_model = model;
+
+            if let Err(e) = config.save() {
+                eprintln!(
+                    "{}",
+                    t_args("save_config_error", &[("error", e.to_string().into())])
+                );
+            }
+        } else {
+            println!(
+                "{}",
+                t_args(
+                    "selected_model_mismatch",
+                    &[("name", config.selected_model.as_str().into())]
+                )
+            );
+            prompt_select_model(&mut config)?;
         }
     }
 
@@ -134,21 +171,7 @@ async fn main() -> Result<()> {
     // 检查模型可用性
     if config.selected_model.is_empty() || !ai::check_availability(&model_config).await? {
         if config.models.len() > 1 {
-            let options: Vec<&String> = config.models.keys().collect();
-            let model_name = match Select::new(&t("model_selection_prompt"), options).prompt() {
-                Ok(name) => name.clone(),
-                Err(_) => {
-                    eprintln!("{}", t("invalid_selection"));
-                    std::process::exit(1);
-                }
-            };
-            model_config = switch_selected_model(&mut config, &model_name)?;
-            if let Err(e) = config.save() {
-                eprintln!(
-                    "{}",
-                    t_args("save_config_error", &[("error", e.to_string().into())])
-                );
-            }
+            model_config = prompt_select_model(&mut config)?;
         } else {
             eprintln!("{}", t("model_unavailable"));
             std::process::exit(1);

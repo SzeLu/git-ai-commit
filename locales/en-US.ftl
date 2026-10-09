@@ -24,6 +24,7 @@ api_token_input_prompt = Enter the API token:
 api_token_validation = ❌ API token cannot be empty. Aborting.
 save_config_error = ❌ Failed to save config: { $error }
 no_active_model_error = No usable model in the config
+selected_model_mismatch = ⚠️  The configured selected_model "{ $name }" is not in the models list; please pick one to use
 current_model_label = 📌 Using model: { $model }
 not_git_repo = ❌ The current directory is not a Git repository
 analyzing_changes = 📊 Analyzing code changes...

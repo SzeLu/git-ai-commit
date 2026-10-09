@@ -27,8 +27,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 └─ uninstall.sh        # removes the symlink
 ```
 
-1. **CLI (`main.rs`)** – Uses `clap` to expose flags such as `--api-key`, `--model`, `--auto`, `--all`, and `--dry-run`. After parsing, it:
+1. **CLI (`main.rs`)** – Uses `clap` to expose flags `--auto`/`-a`, `--all`, `--dry-run`, and `--debug`. After parsing, it:
    * Loads the configuration file (multiple model support).
+   * Resolves the active model (see "Model resolution" below).
    * Verifies we are inside a Git repo.
    * Gathers the diff, status and stats via `git.rs`.
    * Calls `ai::generate_commit_message` to ask LLM for a commit message.
@@ -42,6 +43,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 4. **Commit module (`commit.rs`)** – Validates the format against Conventional Commit rules and commits using a temporary file to avoid argument length limits.
 
 5. **Configuration (`config.rs`)** – Stores a map of named models, the currently selected model, token limits and temperature. Configuration is read from `$HOME/.git-ai-commit/config.json`.
+
+**Model resolution.** `Config::active_model()` looks up `models[selected_model]` and returns `None` when `selected_model` is empty or points at a missing entry. When it returns `None`:
+
+* `models` is empty → interactive prompts collect model name, base URL and API token; the entry is inserted, selected, and saved.
+* `models` is non-empty → an `inquire::Select` picker lists the configured models; the choice replaces `selected_model` and is saved.
+
+After resolution, `ai::check_availability` sends a probe request. If it fails, the picker is offered again when `models.len() > 1`; otherwise the run aborts with `model_unavailable`.
 
 ## Usage Tips
 

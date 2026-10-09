@@ -21,6 +21,14 @@ The project is a Rust-based CLI tool that uses LLMs to generate conventional com
 - `src/commit.rs`: Validation and execution of `git commit`.
 - `src/config.rs`: Configuration management (`$HOME/.git-ai-commit/config.json`).
 
+## Model Resolution (`main.rs`)
+
+On startup the active model is resolved via `Config::active_model()` (`models[selected_model]`, `None` when `selected_model` is empty or misses):
+
+- `active_model()` is `None` **and** `models` is empty → interactive prompts collect model name / base URL / API token; the entry is inserted, selected, and saved.
+- `active_model()` is `None` **and** `models` is non-empty (empty or dangling `selected_model`) → an `inquire::Select` picker lists the configured models; the choice replaces `selected_model` and is saved.
+- After resolution, `ai::check_availability` probes the model. On failure: if `models.len() > 1` the picker is offered again to switch; otherwise the run aborts with `model_unavailable`.
+
 ## Key Developer Notes
 
 - **Configuration**: User config is stored in `$HOME/.git-ai-commit/config.json`.

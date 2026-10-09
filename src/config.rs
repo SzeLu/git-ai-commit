@@ -228,6 +228,19 @@ mod tests {
         assert!(config.active_model().is_some());
     }
 
+    /// selected_model 指向 models 里不存在的条目时，active_model() 必须是 None——
+    /// 这是 main.rs 走「从已有列表里选择」分支、而不是手动录入分支的判定条件。
+    #[test]
+    fn active_model_is_none_when_selected_model_misses() {
+        let config = parse(
+            r#"{"models": {"m": {"model": "m", "base_url": "http://x/v1", "api_token": "t"}},
+                "selected_model": "other"}"#,
+        );
+
+        assert!(!config.models.is_empty());
+        assert!(config.active_model().is_none());
+    }
+
     /// 一个只写了模型信息的极简配置也要能用
     #[test]
     fn parses_minimal_config() {

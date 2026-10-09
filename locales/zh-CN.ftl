@@ -17,6 +17,7 @@ api_token_input_prompt = 请输入 API Token:
 api_token_validation = ❌ API Token 不能为空。终止操作。
 save_config_error = ❌ 保存配置失败: { $error }
 no_active_model_error = 配置中没有可用的模型
+selected_model_mismatch = ⚠️  配置中的 selected_model "{ $name }" 不在 models 列表中，请选择要使用的模型
 current_model_label = 📌 当前使用的大模型: { $model }
 not_git_repo = ❌ 当前目录不是 Git 仓库
 analyzing_changes = 📊 分析代码变更...
