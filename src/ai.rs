@@ -322,7 +322,9 @@ impl StreamedCompletion {
             );
         }
 
-        Ok(self.content)
+        // 首尾空行是模型的常见产物（流式正文常以 `\n\n` 开头），
+        // 在这里统一剪掉：否则下游的格式校验和最终展示都要各自处理一遍。
+        Ok(self.content.trim().to_string())
     }
 }
 
@@ -1136,6 +1138,36 @@ mod tests {
         let text = completion.require_content("生成 commit 消息", &[]).unwrap();
 
         assert_eq!(text, "半截消息");
+    }
+
+    /// 回归测试：流式正文常以空行开头（实测 qwen3 就是 `\n\n`），
+    /// 必须在出口剪掉，否则下游格式校验会把合规的消息判成「消息为空」。
+    #[tokio::test]
+    async fn require_content_trims_surrounding_blank_lines() {
+        let pieces = vec![
+            sse(r#"{"choices":[{"delta":{"content":"\n\nfeat: 修正格式校验\n"}}]}"#),
+            sse("[DONE]"),
+        ];
+
+        let completion = run(pieces).await;
+        let text = completion.require_content("生成 commit 消息", &[]).unwrap();
+
+        assert_eq!(text, "feat: 修正格式校验");
+    }
+
+    /// 剪空行不能把「只有空行」的响应变成通过——那仍然是没内容
+    #[tokio::test]
+    async fn require_content_still_rejects_whitespace_only() {
+        crate::i18n::pin_test_locale();
+
+        let pieces = vec![
+            sse(r#"{"choices":[{"delta":{"content":"\n  \n\t\n"}}]}"#),
+            sse("[DONE]"),
+        ];
+
+        let completion = run(pieces).await;
+
+        assert!(completion.require_content("生成 commit 消息", &[]).is_err());
     }
 
     /// 密钥不能出现在错误信息里（网关可能把 Authorization 回显进响应）

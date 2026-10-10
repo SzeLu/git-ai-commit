@@ -23,12 +23,15 @@ pub fn validate_commit_message(message: &str) -> Validation {
     let mut problems = Vec::new();
     let lines: Vec<&str> = message.lines().collect();
 
-    if lines.is_empty() || lines[0].trim().is_empty() {
+    // 只认「整条消息都是空白」为空消息。流式返回常常以 `\n\n` 开头，
+    // 而 `git commit` 默认 cleanup=strip 会去掉这些前导空行——若把首行空行
+    // 也当成空消息，合规的消息会被判不合规，还会顺带跳过后面所有检查。
+    let Some(header_index) = lines.iter().position(|line| !line.trim().is_empty()) else {
         problems.push(t("empty_message"));
         return Validation { problems };
-    }
+    };
 
-    let header = lines[0].trim();
+    let header = lines[header_index].trim();
     let commit_types = vec![
         "feat", "fix", "docs", "style", "refactor", "perf", "test", "chore", "ci", "build",
         "revert",
@@ -60,9 +63,12 @@ pub fn validate_commit_message(message: &str) -> Validation {
         }
     }
 
-    // 检查 body 格式
-    if lines.len() >= 2 && !lines[1].trim().is_empty() {
-        problems.push(t("missing_blank_line"));
+    // 检查 body 格式：header 的**下一行**必须是空行。
+    // 索引要跟着 header 走，否则 header 前有空行时这里会看错行。
+    if let Some(next) = lines.get(header_index + 1) {
+        if !next.trim().is_empty() {
+            problems.push(t("missing_blank_line"));
+        }
     }
 
     Validation { problems }
@@ -218,6 +224,57 @@ mod tests {
 
         assert!(!validation.ok());
         assert!(validation.problems[0].contains("消息为空"));
+    }
+
+    /// 只有整条消息都是空白才算空消息——空字符串只是其中一个特例
+    #[test]
+    fn rejects_whitespace_only_message() {
+        crate::i18n::pin_test_locale();
+
+        let validation = validate_commit_message("\n\n   \n\t\n");
+
+        assert!(!validation.ok());
+        assert!(validation.problems[0].contains("消息为空"));
+    }
+
+    /// 回归测试：正文前导空行不是「消息为空」。
+    ///
+    /// 流式返回常以 `\n\n` 开头，`git commit` 又会按 cleanup=strip 去掉它们，
+    /// 所以首行空行曾经让完全合规的消息飘出「⚠️ 消息为空」——
+    /// 交互模式只是碍眼，`--auto` + strict_format 会直接拒绝提交。
+    #[test]
+    fn accepts_leading_blank_lines() {
+        crate::i18n::pin_test_locale();
+
+        let message = "\n\nfeat(ai): 修复摘要生成逻辑\n\n- 细节";
+        let validation = validate_commit_message(message);
+
+        assert!(validation.ok(), "{:?}", validation.problems);
+    }
+
+    /// 前导空行不能连带吞掉真正的格式问题：判断空行要看 header 的**下一行**，
+    /// 而不是消息的第一行。
+    #[test]
+    fn still_reports_problems_after_leading_blank_lines() {
+        crate::i18n::pin_test_locale();
+
+        let message = "\n\n更新了一些东西\n- 紧跟着的 body";
+        let validation = validate_commit_message(message);
+
+        assert_eq!(validation.problems.len(), 2, "{:?}", validation.problems);
+        assert!(validation
+            .problems
+            .iter()
+            .any(|p| p.contains("标题格式不正确")));
+        assert!(validation.problems.iter().any(|p| p.contains("空行")));
+    }
+
+    /// 前导空行下的 50 字上限仍按 header 行来量（别量错行）
+    #[test]
+    fn counts_subject_on_header_line_after_leading_blank_lines() {
+        let message = format!("\n\nfeat: {}", "字".repeat(51));
+
+        assert!(!validate_commit_message(&message).ok());
     }
 
     /// 确认提示语结尾那个空格是原文的一部分（用户在提示后面直接敲 y/n/e），
