@@ -9,6 +9,7 @@ use crate::config::{self, GenParams};
 use crate::debug;
 use crate::git::RepoInfo;
 use crate::i18n::{t, t_args};
+use crate::model_limits::{self, ModelLimits};
 
 /// 构造 commit 消息生成的 system prompt。
 ///
@@ -42,7 +43,9 @@ struct LlmRequest {
     model: String,
     messages: Vec<Message>,
     temperature: f32,
-    max_tokens: u32,
+    /// 省略该字段时由服务端决定输出上限：探测不到模型能力时走这条路。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
 }
@@ -145,7 +148,7 @@ struct LlmResponse {
 pub(crate) struct StreamStats {
     pub endpoint: String,
     pub model: String,
-    pub max_tokens: u32,
+    pub max_tokens: Option<u32>,
     pub temperature: f32,
     pub status: u16,
     pub content_type: Option<String>,
@@ -165,6 +168,14 @@ pub(crate) struct StreamStats {
 }
 
 impl StreamStats {
+    /// 诊断块里显示的 max_tokens。请求省略该字段时用本地化的「未提供」，
+    /// 而不是塞一个并不存在的 0 进去误导排障。
+    fn max_tokens_label(&self) -> String {
+        self.max_tokens
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| t("not_provided"))
+    }
+
     /// 按优先级给出最可能的结论。
     ///
     /// 这些结论是**用户直接看到**的排障信息（`require_content` 把它并进错误里），
@@ -176,12 +187,12 @@ impl StreamStats {
             _ if truncated && self.content_frames == 0 && self.reasoning_frames > 0 => {
                 Some(t_args(
                     "diagnosis_reasoning_truncated",
-                    &[("limit", self.max_tokens.into())],
+                    &[("limit", self.max_tokens_label().into())],
                 ))
             }
             _ if truncated && self.content_frames > 0 => Some(t_args(
                 "diagnosis_output_truncated",
-                &[("limit", self.max_tokens.into())],
+                &[("limit", self.max_tokens_label().into())],
             )),
             _ if self.content_frames == 0 && self.reasoning_frames > 0 => {
                 Some(t("diagnosis_reasoning_channel"))
@@ -222,7 +233,7 @@ impl StreamStats {
             t_args(
                 "report_request",
                 &[
-                    ("max_tokens", self.max_tokens.into()),
+                    ("max_tokens", self.max_tokens_label().into()),
                     // 温度按字符串传，不传 f32：Fluent 内部把数值统一走 f64，
                     // `0.7f32 as f64` 是 0.699999988079071，渲染出来就是
                     // `temperature=0.699999988079071`——而 `format!("{}", 0.7f32)`
@@ -315,7 +326,7 @@ impl StreamedCompletion {
                     "truncated_output_warning",
                     &[
                         ("what", what.into()),
-                        ("limit", self.stats.max_tokens.into())
+                        ("limit", self.stats.max_tokens_label().into())
                     ]
                 )
                 .yellow()
@@ -336,15 +347,18 @@ pub async fn check_availability(config: &config::ModelConfig) -> Result<bool> {
     let _stats = StreamStats {
         endpoint: chat_endpoint(&config.base_url),
         model: config.model.clone(),
-        max_tokens: 10,
+        max_tokens: Some(10),
         temperature: 0.7,
         ..Default::default()
     };
 
     let messages = vec![Message::user("hi".to_string())];
+    // 可用性探针刻意带一个很小的固定上限，与生成请求的自动预算无关：
+    // 这里只关心「能不能回一个 choice」，不该让模型生成长回复。
     let params = GenParams {
-        max_tokens: 10,
+        max_tokens: Some(10),
         temperature: 0.7,
+        limits: ModelLimits::default(),
     };
 
     let client = reqwest::Client::builder()
@@ -362,7 +376,7 @@ pub async fn check_availability(config: &config::ModelConfig) -> Result<bool> {
     };
 
     let response = client
-        .post(&chat_endpoint(&config.base_url))
+        .post(chat_endpoint(&config.base_url))
         .header("Authorization", format!("Bearer {}", config.api_token))
         .header("Content-Type", "application/json")
         .json(&request)
@@ -409,10 +423,23 @@ where
 {
     let started = Instant::now();
     let endpoint = chat_endpoint(&config.base_url);
+
+    // 同一份配置在短 diff 与分块摘要上的 prompt 规模差很多，所以按本次实际
+    // messages 算输出预算，而不是启动时算一个固定值传给所有请求。
+    let prompt_bytes: usize = messages
+        .iter()
+        .map(|m| m.content.len() + m.role.len())
+        .sum();
+    let max_tokens =
+        model_limits::resolve_max_tokens(params.max_tokens, params.limits, prompt_bytes);
+    let max_tokens_label = max_tokens
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "auto".to_string());
+
     let mut stats = StreamStats {
         endpoint: endpoint.clone(),
         model: config.model.clone(),
-        max_tokens: params.max_tokens,
+        max_tokens,
         temperature: params.temperature,
         ..Default::default()
     };
@@ -426,7 +453,14 @@ where
         eprintln!("[debug] ⚠️ 调试输出可能包含模型原文与部分差异内容，请勿直接粘贴到公开处");
         eprintln!(
             "[debug] → POST {} model={} max_tokens={} temperature={} stream=true",
-            endpoint, config.model, params.max_tokens, params.temperature
+            endpoint, config.model, max_tokens_label, params.temperature
+        );
+        eprintln!(
+            "[debug]   prompt={} 字节，模型能力={}（context={:?}, max_output={:?}）",
+            prompt_bytes,
+            params.limits.source.unwrap_or("未探测到"),
+            params.limits.context_length,
+            params.limits.max_output_tokens
         );
         eprintln!("[debug]   messages: [{}]", sizes.join(", "));
     }
@@ -442,7 +476,7 @@ where
         model: config.model.to_string(),
         messages,
         temperature: params.temperature,
-        max_tokens: params.max_tokens,
+        max_tokens,
         stream: Some(true),
     };
 
@@ -839,8 +873,9 @@ mod tests {
 
     fn params() -> GenParams {
         GenParams {
-            max_tokens: 64,
+            max_tokens: Some(64),
             temperature: 0.7,
+            limits: ModelLimits::default(),
         }
     }
 
@@ -1024,7 +1059,7 @@ mod tests {
         let stats = StreamStats {
             endpoint: "http://127.0.0.1:1/v1/chat/completions".to_string(),
             model: "test-model".to_string(),
-            max_tokens: 64,
+            max_tokens: Some(64),
             temperature: 0.7,
             status: 200,
             content_type: Some("text/event-stream".to_string()),
@@ -1227,5 +1262,87 @@ mod tests {
     fn system_prompt_embeds_configured_language() {
         assert!(system_prompt("English").contains("English"));
         assert!(system_prompt("中文").contains("中文"));
+    }
+
+    /// 探测不到模型能力、配置也没写时，请求体里必须完全省略 max_tokens，
+    /// 让服务端自己决定输出上限——这是切换模型零配置的关键退路。
+    #[test]
+    fn request_omits_max_tokens_when_no_limit_is_known() {
+        let request = LlmRequest {
+            model: "m".to_string(),
+            messages: vec![Message::user("hi")],
+            temperature: 0.7,
+            max_tokens: None,
+            stream: Some(true),
+        };
+
+        let json = serde_json::to_value(&request).unwrap();
+        assert!(json.get("max_tokens").is_none(), "{json}");
+    }
+
+    /// config.json 里那个「给推理模型兜底」的超大值，遇到窗口小的模型必须自动收窄，
+    /// 且统计块记录的是真正发出去的值，不是配置里的原值。
+    #[tokio::test]
+    async fn max_tokens_is_clamped_by_the_probed_model_window() {
+        let base_url = spawn_sse_server(vec![
+            sse(r#"{"choices":[{"delta":{"content":"ok"}}]}"#),
+            sse("[DONE]"),
+        ])
+        .await;
+        let params = GenParams {
+            max_tokens: Some(409_600),
+            temperature: 0.7,
+            limits: ModelLimits {
+                context_length: Some(32_768),
+                ..Default::default()
+            },
+        };
+
+        let completion = stream_chat_completion(
+            &test_config(base_url),
+            vec![Message::user("hi")],
+            params,
+            |_| {},
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(completion.content, "ok");
+        let sent = completion.stats.max_tokens.unwrap();
+        assert!(sent < 32_768, "预算未收窄到模型窗口内: {sent}");
+        assert!(sent > 256, "预算不该被压成地板值: {sent}");
+    }
+
+    /// 完全自动且探测失败时，统计块要如实显示「未提供」而不是 0
+    #[tokio::test]
+    async fn stats_report_marks_omitted_max_tokens_as_not_provided() {
+        crate::i18n::pin_test_locale();
+
+        let base_url = spawn_sse_server(vec![
+            sse(r#"{"choices":[{"delta":{"content":"ok"}}]}"#),
+            sse("[DONE]"),
+        ])
+        .await;
+        let params = GenParams {
+            max_tokens: None,
+            temperature: 0.7,
+            limits: ModelLimits::default(),
+        };
+
+        let completion = stream_chat_completion(
+            &test_config(base_url),
+            vec![Message::user("hi")],
+            params,
+            |_| {},
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(completion.stats.max_tokens, None);
+        assert!(
+            completion.stats.report().contains("max_tokens=未提供"),
+            "{}",
+            completion.stats.report()
+        );
     }
 }

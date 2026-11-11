@@ -5,6 +5,7 @@ mod commit;
 mod config;
 mod debug;
 mod git;
+mod model_limits;
 // 用 `pub` 修饰：i18n 的调用点要到「替换硬编码文案」那一步才接进来，
 // 私有模块会让整块尚未被调用的 API 触发 dead_code 警告。
 pub mod i18n;
@@ -177,6 +178,11 @@ async fn main() -> Result<()> {
         }
     }
 
+    // 探测当前模型的 token 上限。必须在可用性检查（可能切换模型）之后做，
+    // 否则拿到的是旧模型的能力。探测失败不报错：请求会省略 max_tokens，
+    // 由服务端自己决定输出上限。
+    let limits = model_limits::probe(&model_config).await;
+
     // 红色只加在模型名上，所以先着色再作为变量传进去，整行不能着色。
     // 必须在模型切换**之后**取值，否则会显示切换前的旧模型。
     let model_name_red = model_config.model.red().to_string();
@@ -215,6 +221,7 @@ async fn main() -> Result<()> {
     let generated = generate_message(
         &config,
         &model_config,
+        limits,
         &diff,
         &status,
         &diff_stats,
@@ -282,6 +289,7 @@ async fn main() -> Result<()> {
 async fn generate_message(
     config: &config::Config,
     model_config: &config::ModelConfig,
+    limits: model_limits::ModelLimits,
     diff: &str,
     status: &str,
     diff_stats: &str,
@@ -304,7 +312,7 @@ async fn generate_message(
         let text = ai::generate_commit_message_streaming(
             config,
             &context,
-            config.final_params(),
+            config.final_params(limits),
             print_delta,
         )
         .await?;
@@ -351,7 +359,7 @@ async fn generate_message(
             model_config,
             language,
             piece,
-            config.summary_params(),
+            config.summary_params(limits),
             &label,
         )
         .await
@@ -433,10 +441,10 @@ async fn generate_message(
 
     println!("{}", t("final_message").blue());
     match ai::generate_commit_message_custom_prompt(
-        &model_config,
+        model_config,
         language,
         &custom_prompt,
-        config.final_params(),
+        config.final_params(limits),
         print_delta,
     )
     .await

@@ -1,5 +1,6 @@
 // src/config.rs
 use crate::i18n::t;
+use crate::model_limits::ModelLimits;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -16,9 +17,11 @@ pub struct Config {
     /// 当前选中的模型，默认使用 `model`
     #[serde(default = "default_selected_model")]
     pub selected_model: String,
-    /// 最终生成 commit 消息时的 token 上限
-    #[serde(default = "default_max_tokens")]
-    pub max_tokens: u32,
+    /// 生成请求的 token **上限**，不是固定值：探测到模型窗口后会按模型自动收窄。
+    /// 缺省（`None`）表示完全自动——切换模型不需要改配置。
+    /// `skip_serializing_if` 让「没配过」在 save() 后仍保持没配过，而不是写回 null。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
     #[serde(default = "default_temperature")]
     pub temperature: f32,
     /// 是否跳过提交确认（与命令行 `--auto` 等价，`--dry-run` 优先）
@@ -41,16 +44,15 @@ pub struct Config {
 /// 一次生成请求的参数。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GenParams {
-    pub max_tokens: u32,
+    /// config.json 里的显式上限；`None` 表示完全交给模型能力探测决定
+    pub max_tokens: Option<u32>,
     pub temperature: f32,
+    /// 当前模型的能力（上下文窗口等）。运行时探测得到，不属于配置文件。
+    pub limits: ModelLimits,
 }
 
 fn default_language() -> Option<String> {
     Some("zh-CN".to_string())
-}
-
-fn default_max_tokens() -> u32 {
-    32768
 }
 
 fn default_temperature() -> f32 {
@@ -90,7 +92,7 @@ impl Default for Config {
             language: default_language(),
             models: HashMap::new(),
             selected_model: "".to_string(),
-            max_tokens: default_max_tokens(),
+            max_tokens: None,
             temperature: default_temperature(),
             auto_commit: default_auto_commit(),
             strict_format: default_strict_format(),
@@ -159,18 +161,21 @@ impl Config {
     ///
     /// 缺省继承 `max_tokens` / `temperature`，保证「调参走 config.json」这条规则
     /// 对摘要同样成立；`summary_*` 只是给「全局上限很大、但想单独给摘要设界」的场景。
-    pub fn summary_params(&self) -> GenParams {
+    /// `limits` 是本次运行探测到的模型能力，由调用方在启动时算一次后传进来。
+    pub fn summary_params(&self, limits: ModelLimits) -> GenParams {
         GenParams {
-            max_tokens: self.summary_max_tokens.unwrap_or(self.max_tokens),
+            max_tokens: self.summary_max_tokens.or(self.max_tokens),
             temperature: self.summary_temperature.unwrap_or(self.temperature),
+            limits,
         }
     }
 
     /// 最终生成 commit 消息的参数。
-    pub fn final_params(&self) -> GenParams {
+    pub fn final_params(&self, limits: ModelLimits) -> GenParams {
         GenParams {
             max_tokens: self.max_tokens,
             temperature: self.temperature,
+            limits,
         }
     }
 
@@ -219,7 +224,8 @@ mod tests {
             }"#,
         );
 
-        assert_eq!(config.max_tokens, 32768);
+        // 不写 max_tokens 就是完全自动，不再有硬编码的 32768 兜底
+        assert_eq!(config.max_tokens, None);
         assert_eq!(config.temperature, 0.7);
         assert!(!config.auto_commit);
         assert!(config.strict_format);
@@ -248,7 +254,14 @@ mod tests {
                 "selected_model": "m", "max_tokens": 1234}"#,
         );
 
-        assert_eq!(config.max_tokens, 1234);
+        assert_eq!(config.max_tokens, Some(1234));
+    }
+
+    /// 缺省时 max_tokens 不写回配置文件，避免把「自动」固化成某个数字
+    #[test]
+    fn default_config_does_not_persist_a_token_limit() {
+        let json = serde_json::to_string(&Config::default()).unwrap();
+        assert!(!json.contains("\"max_tokens\""), "{json}");
     }
 
     /// 摘要缺省继承 max_tokens / temperature
@@ -257,9 +270,24 @@ mod tests {
         let config = parse(
             r#"{"models": {}, "selected_model": "m", "max_tokens": 4096, "temperature": 0.4}"#,
         );
+        let limits = ModelLimits::default();
 
-        assert_eq!(config.summary_params().max_tokens, 4096);
-        assert_eq!(config.summary_params().temperature, 0.4);
+        assert_eq!(config.summary_params(limits).max_tokens, Some(4096));
+        assert_eq!(config.summary_params(limits).temperature, 0.4);
+        assert_eq!(config.summary_params(limits).limits, limits);
+    }
+
+    /// 模型能力要一路带到请求参数里，否则自动预算无从计算
+    #[test]
+    fn params_carry_the_probed_model_limits() {
+        let config = parse(r#"{"models": {}, "selected_model": "m"}"#);
+        let limits = ModelLimits {
+            context_length: Some(32_768),
+            ..Default::default()
+        };
+
+        assert_eq!(config.final_params(limits).limits, limits);
+        assert_eq!(config.summary_params(limits).limits, limits);
     }
 
     /// 显式配置摘要参数时覆盖继承值
@@ -269,12 +297,13 @@ mod tests {
             r#"{"models": {}, "selected_model": "m", "max_tokens": 4096, "temperature": 0.4,
                 "summary_max_tokens": 512, "summary_temperature": 0.1}"#,
         );
+        let limits = ModelLimits::default();
 
-        assert_eq!(config.summary_params().max_tokens, 512);
-        assert_eq!(config.summary_params().temperature, 0.1);
+        assert_eq!(config.summary_params(limits).max_tokens, Some(512));
+        assert_eq!(config.summary_params(limits).temperature, 0.1);
         // 最终生成不受摘要配置影响
-        assert_eq!(config.final_params().max_tokens, 4096);
-        assert_eq!(config.final_params().temperature, 0.4);
+        assert_eq!(config.final_params(limits).max_tokens, Some(4096));
+        assert_eq!(config.final_params(limits).temperature, 0.4);
     }
 
     /// 语言字段：缺省为 zh-CN（中文优先），显式配置则以配置为准。
@@ -298,7 +327,6 @@ mod tests {
     #[test]
     fn chunk_threshold_is_configurable() {
         let config = parse(r#"{"models": {}, "selected_model": "m", "chunk_threshold": 100000}"#);
-
         assert_eq!(config.chunk_threshold, 100000);
     }
 }
