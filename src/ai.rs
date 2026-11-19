@@ -355,15 +355,17 @@ pub async fn check_availability(config: &config::ModelConfig) -> Result<bool> {
     let messages = vec![Message::user("hi".to_string())];
     // 可用性探针刻意带一个很小的固定上限，与生成请求的自动预算无关：
     // 这里只关心「能不能回一个 choice」，不该让模型生成长回复。
+    // 超时同理用固定的 10 秒快速失败，不走 config 里给生成请求设的两分钟。
     let params = GenParams {
         max_tokens: Some(10),
         temperature: 0.7,
         limits: ModelLimits::default(),
+        timeout: Duration::from_secs(10),
     };
 
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(10))
+        .timeout(params.timeout)
         .build()
         .context(t("http_client_error"))?;
 
@@ -467,8 +469,9 @@ where
 
     let client = Client::builder()
         .connect_timeout(Duration::from_secs(10))
-        // 只作兜底：网关挂起时不让工具永远卡死。放得足够宽，避免误杀长时间生成。
-        .timeout(Duration::from_secs(600))
+        // 总超时来自 config.json 的 request_timeout_secs（默认两分钟）：
+        // 网关挂起时不让工具永远卡死，同时足够宽以免误杀长时间生成。
+        .timeout(params.timeout)
         .build()
         .context(t("http_client_error"))?;
 
@@ -876,6 +879,7 @@ mod tests {
             max_tokens: Some(64),
             temperature: 0.7,
             limits: ModelLimits::default(),
+            timeout: Duration::from_secs(120),
         }
     }
 
@@ -1296,6 +1300,7 @@ mod tests {
                 context_length: Some(32_768),
                 ..Default::default()
             },
+            timeout: Duration::from_secs(120),
         };
 
         let completion = stream_chat_completion(
@@ -1327,6 +1332,7 @@ mod tests {
             max_tokens: None,
             temperature: 0.7,
             limits: ModelLimits::default(),
+            timeout: Duration::from_secs(120),
         };
 
         let completion = stream_chat_completion(
@@ -1344,5 +1350,37 @@ mod tests {
             "{}",
             completion.stats.report()
         );
+    }
+
+    /// 回归测试：总超时必须取自请求参数（最终来自 config.json），
+    /// 而不是写死在 client 里。用一个故意延迟响应的本地服务 + 极短超时验证。
+    #[tokio::test]
+    async fn request_timeout_from_params_is_enforced() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = socket.read(&mut buf).await;
+            // 故意远长于下面的超时，逼出超时错误
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            let _ = socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .await;
+        });
+
+        let params = GenParams {
+            timeout: Duration::from_millis(50),
+            ..params()
+        };
+        let result = stream_chat_completion(
+            &test_config(format!("http://{addr}/v1")),
+            vec![Message::user("hi")],
+            params,
+            |_| {},
+        )
+        .await;
+
+        assert!(result.is_err(), "配置的总超时没有生效");
     }
 }

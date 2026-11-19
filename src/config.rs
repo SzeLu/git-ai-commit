@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
@@ -39,6 +40,9 @@ pub struct Config {
     /// diff 超过多少字节才启用分块，默认 8000
     #[serde(default = "default_chunk_threshold")]
     pub chunk_threshold: usize,
+    /// 请求大模型接口的总超时（秒），默认 120（两分钟）
+    #[serde(default = "default_request_timeout_secs")]
+    pub request_timeout_secs: u64,
 }
 
 /// 一次生成请求的参数。
@@ -49,6 +53,8 @@ pub struct GenParams {
     pub temperature: f32,
     /// 当前模型的能力（上下文窗口等）。运行时探测得到，不属于配置文件。
     pub limits: ModelLimits,
+    /// 请求大模型的总超时，来自 config.json 的 request_timeout_secs
+    pub timeout: Duration,
 }
 
 fn default_language() -> Option<String> {
@@ -69,6 +75,10 @@ fn default_strict_format() -> bool {
 
 fn default_chunk_threshold() -> usize {
     8000
+}
+
+fn default_request_timeout_secs() -> u64 {
+    120
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -99,6 +109,7 @@ impl Default for Config {
             summary_max_tokens: None,
             summary_temperature: None,
             chunk_threshold: default_chunk_threshold(),
+            request_timeout_secs: default_request_timeout_secs(),
         }
     }
 }
@@ -167,6 +178,7 @@ impl Config {
             max_tokens: self.summary_max_tokens.or(self.max_tokens),
             temperature: self.summary_temperature.unwrap_or(self.temperature),
             limits,
+            timeout: self.request_timeout(),
         }
     }
 
@@ -176,7 +188,13 @@ impl Config {
             max_tokens: self.max_tokens,
             temperature: self.temperature,
             limits,
+            timeout: self.request_timeout(),
         }
+    }
+
+    /// 请求超时：配置里的秒数转成 Duration。
+    fn request_timeout(&self) -> Duration {
+        Duration::from_secs(self.request_timeout_secs)
     }
 
     pub fn save(&self) -> Result<()> {
@@ -230,6 +248,7 @@ mod tests {
         assert!(!config.auto_commit);
         assert!(config.strict_format);
         assert_eq!(config.chunk_threshold, 8000);
+        assert_eq!(config.request_timeout_secs, 120);
         assert!(config.active_model().is_some());
     }
 
@@ -328,5 +347,31 @@ mod tests {
     fn chunk_threshold_is_configurable() {
         let config = parse(r#"{"models": {}, "selected_model": "m", "chunk_threshold": 100000}"#);
         assert_eq!(config.chunk_threshold, 100000);
+    }
+
+    /// 请求超时缺省为两分钟，可用 config.json 覆盖，并贯通到两类请求参数。
+    #[test]
+    fn request_timeout_defaults_to_two_minutes_and_is_configurable() {
+        assert_eq!(Config::default().request_timeout_secs, 120);
+        assert_eq!(
+            parse(r#"{"models": {}, "selected_model": "m"}"#).request_timeout_secs,
+            120
+        );
+        assert_eq!(
+            parse(r#"{"models": {}, "selected_model": "m", "request_timeout_secs": 30}"#)
+                .request_timeout_secs,
+            30
+        );
+
+        let config = Config::default();
+        let expected = Duration::from_secs(120);
+        assert_eq!(
+            config.final_params(ModelLimits::default()).timeout,
+            expected
+        );
+        assert_eq!(
+            config.summary_params(ModelLimits::default()).timeout,
+            expected
+        );
     }
 }
